@@ -19,7 +19,16 @@ All OS commands live in `src/sys.rs` and `src/apps/{linux,macos}.rs` behind `#[c
   are merged with `~/.config/omarchy/extensions/omarchy-menu.jsonc`; `when`/`disabled`/`checked`
   conditions run in the background; submenus open via `omarchy-menu summon <id>`.
   `TOMBOY_PLATFORM=generic` turns this off.
-- **Fallback**: anything else offers a DuckDuckGo search.
+- **Agent, inside tomboy**: "Ask agent" runs the coding agent headless — Omarchy's default
+  (`omarchy-default-agent`), else `$TOMBOY_AGENT` (default `claude`) — in `~/Work`, and streams
+  its answer into the window as Markdown, with tool calls, time and cost. The field then takes
+  follow-ups in the same session (claude `--resume`). Enter on an empty field copies the
+  answer; Esc stops a running agent, a second Esc closes. Claude streams JSON events;
+  opencode, codex and crush stream plain text; other agents open in a terminal instead.
+- **Voice → agent**: text dictated into tomboy with Superwhisper (one multi-character insert
+  that matches `superwhisper read` from the last minute) goes straight to the agent. Typed
+  text never triggers it.
+- **Fallback**: anything else offers "Ask agent" and a DuckDuckGo search.
 
 ↑/↓ pick · Enter run · Esc or click away to close.
 
@@ -44,6 +53,8 @@ bind = SUPER ALT, SPACE, exec, ~/Work/tomboy/target/release/tomboy
 | `src/apps/mod.rs` | App entry type and fuzzy search (shared) |
 | `src/apps/linux.rs` | XDG desktop entry scanning and launching |
 | `src/apps/macos.rs` | `.app` bundle scanning and launching |
+| `src/dictation.rs` | Detecting Superwhisper dictation |
+| `src/agent.rs` | Handing a prompt to the coding agent |
 | `src/sys.rs` | OS commands: open URL, clipboard, detached spawn |
 | `src/calc.rs` | Expression evaluator |
 | `src/url.rs` | URL detection and opening |
@@ -61,6 +72,7 @@ CARGO_FEATURE_PURE=1 cargo check --target aarch64-apple-darwin
 
 ```sh
 cargo test
-cargo run -- --snap shot.png --scene calc   # scenes: apps calc url web
+cargo test live_claude -- --ignored   # runs the real claude CLI (tiny paid request)
+cargo run -- --snap shot.png --scene calc   # scenes: apps calc url web omarchy chat
 cargo run -- --tree tree.json --scene apps
 ```

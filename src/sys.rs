@@ -52,6 +52,40 @@ fn clipboard_helpers() -> Vec<&'static [&'static str]> {
     vec![&["pbcopy"]]
 }
 
+/// Run `argv` in a new terminal window, starting in $HOME.
+#[cfg(target_os = "linux")]
+pub fn run_in_terminal(argv: &[&str]) -> io::Result<()> {
+    let mut cmd = match std::env::var("TERMINAL").ok().filter(|t| !t.is_empty()) {
+        _ if on_path("xdg-terminal-exec") => Command::new("xdg-terminal-exec"),
+        Some(term) => { let mut c = Command::new(term); c.arg("-e"); c }
+        None => { let mut c = Command::new("alacritty"); c.arg("-e"); c }
+    };
+    cmd.args(argv);
+    if let Some(home) = home_dir() { cmd.current_dir(home); }
+    spawn_detached(&mut cmd)
+}
+
+/// Run `argv` in a new Terminal.app window, starting in $HOME.
+#[cfg(target_os = "macos")]
+pub fn run_in_terminal(argv: &[&str]) -> io::Result<()> {
+    let shell = argv.iter().map(|a| shell_quote(a)).collect::<Vec<_>>().join(" ");
+    let script = format!("cd ~ && {shell}").replace('\\', "\\\\").replace('"', "\\\"");
+    spawn_detached(Command::new("osascript")
+        .args(["-e", &format!("tell application \"Terminal\" to do script \"{script}\""),
+               "-e", "tell application \"Terminal\" to activate"]))
+}
+
+/// `it's` → `'it'\''s'`, safe as one shell word.
+#[cfg(target_os = "macos")]
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+#[cfg(target_os = "linux")]
+fn on_path(program: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(program).is_file()))
+}
+
 /// The user's home directory.
 pub fn home_dir() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME").filter(|h| !h.is_empty()).map(Into::into)
