@@ -67,6 +67,8 @@ struct Tomboy {
     waker: Option<Waker>,
     /// The agent conversation; while it exists tomboy shows it instead of search results.
     chat: Option<agent::Run>,
+    /// The Omarchy submenu being browsed (`install`, `appearance.top-bar`); `None` at the root.
+    submenu: Option<String>,
 }
 
 /// One row in the result list.
@@ -86,7 +88,8 @@ impl Item {
             Item::Calc { .. } => "Copy Answer",
             Item::Url(_) => "Open in Browser",
             Item::App(_) => "Open Application",
-            Item::Menu(i) if s.menu[*i].is_submenu() => "Open Menu",
+            Item::Menu(i) if omarchy::has_children(&s.menu, &s.menu[*i].id) => "Open Submenu",
+            Item::Menu(i) if s.menu[*i].is_submenu() => "Open in Omarchy Menu",
             Item::Menu(_) => "Run Command",
             Item::WebSearch(_) => "Search the Web",
             Item::Agent(_) => "Ask Agent",
@@ -112,7 +115,7 @@ fn init() -> Tomboy {
     Tomboy {
         query, picked: 0, icons: vec![None; apps.len()], apps, cache: None,
         platform, menu, conds: Conditions::default(), status: None,
-        last_text: String::new(), dictated: Arc::default(), waker: None, chat: None,
+        last_text: String::new(), dictated: Arc::default(), waker: None, chat: None, submenu: None,
     }
 }
 
@@ -161,6 +164,12 @@ fn poll(s: &mut Tomboy, _: f64, tx: &mut Tx) -> bool {
 
 fn results(s: &Tomboy) -> Vec<Item> {
     let q = s.query.text.trim();
+    if let Some(id) = &s.submenu {
+        // Inside a submenu: its rows, or a search of everything under it.
+        let rows = if q.is_empty() { omarchy::children_of(&s.menu, &s.conds, id) }
+            else { omarchy::search(&s.menu, &s.conds, q, Some(id), MAX_APPS) };
+        return rows.into_iter().map(Item::Menu).collect();
+    }
     let mut items = Vec::new();
     if let Some(v) = calc::eval(q) {
         items.push(Item::Calc { expr: q.to_string(), value: calc::format(v) });
@@ -170,7 +179,7 @@ fn results(s: &Tomboy) -> Vec<Item> {
     }
     let app_limit = if q.is_empty() { MAX_APPS } else { MAX_APP_HITS };
     items.extend(apps::search(&s.apps, q, app_limit).into_iter().map(Item::App));
-    items.extend(omarchy::search(&s.menu, &s.conds, q, MAX_MENU_HITS).into_iter().map(Item::Menu));
+    items.extend(omarchy::search(&s.menu, &s.conds, q, None, MAX_MENU_HITS).into_iter().map(Item::Menu));
     if !q.is_empty() && !matches!(items.first(), Some(Item::Calc { .. } | Item::Url(_))) {
         items.push(Item::Agent(q.to_string()));
         items.push(Item::WebSearch(q.to_string()));
@@ -186,6 +195,13 @@ fn run_item(s: &mut Tomboy, item: &Item, tx: &mut Tx) {
         }),
         Item::Url(u) => url::open(u).map(|()| After::Quit),
         Item::App(i) => apps::launch(&s.apps[*i]).map(|()| After::Quit),
+        // A submenu opens inside tomboy; one the shell fills at runtime (Fonts) has no rows
+        // in the config, so it opens in Omarchy's own menu.
+        Item::Menu(i) if omarchy::has_children(&s.menu, &s.menu[*i].id) => {
+            let id = s.menu[*i].id.clone();
+            enter_submenu(s, Some(id));
+            Ok(After::Stay)
+        }
         Item::Menu(i) => match &s.platform {
             Platform::Omarchy { root } => omarchy::run(&s.menu[*i], root).map(|()| After::Quit),
             Platform::Linux | Platform::MacOS => Ok(After::Stay),
@@ -223,6 +239,28 @@ fn ask_agent(s: &mut Tomboy, prompt: &str) -> std::io::Result<After> {
     s.picked = 0;
     s.status = None;
     Ok(After::Stay)
+}
+
+/// Show the rows of submenu `id` (`None`: back to the root search), with an empty field.
+fn enter_submenu(s: &mut Tomboy, id: Option<String>) {
+    s.submenu = id;
+    s.query.clear();
+    s.last_text.clear();
+    s.picked = 0;
+    s.status = None;
+}
+
+/// One level up from the open submenu.
+fn leave_submenu(s: &mut Tomboy) {
+    let up = s.submenu.as_deref().and_then(omarchy::parent_of).map(str::to_string);
+    enter_submenu(s, up);
+}
+
+/// "Install" or "Appearance › Menu Bar" for the open submenu.
+fn submenu_title(s: &Tomboy) -> Option<String> {
+    let id = s.submenu.as_deref()?;
+    let entry = s.menu.iter().find(|m| m.id == id)?;
+    Some(entry.parents.iter().cloned().chain([entry.label.clone()]).collect::<Vec<_>>().join(" › "))
 }
 
 fn chat_running(s: &Tomboy) -> bool {
@@ -284,6 +322,12 @@ fn on_input_key(s: &mut Tomboy, ev: &KeyEvent, tx: &mut Tx) -> bool {
     match ev.key {
         Key::Down if n > 0 => s.picked = (s.picked + 1) % n,
         Key::Up if n > 0 => s.picked = (s.picked + n - 1) % n,
+        // In a submenu, Esc (or Backspace on an empty field) goes back up a level.
+        Key::Escape | Key::Backspace if s.submenu.is_some() && s.query.text.is_empty() => {
+            leave_submenu(s);
+            return true;
+        }
+        Key::Escape if s.submenu.is_some() => { s.query.clear(); s.last_text.clear(); s.picked = 0; return true; }
         Key::Escape => { quit(s, tx); return true; }
         _ => return false,
     }
@@ -296,7 +340,10 @@ fn view(s: &Tomboy, cx: &mut Cx<Tomboy>) -> El {
     let t = tok::theme(dark);
     let accent = tok::accent(0, dark);
 
-    let placeholder = if s.chat.is_some() { "Ask a follow-up…" } else { "Search apps, calculate, or paste a URL…" };
+    let crumb = if s.chat.is_none() { submenu_title(s) } else { None };
+    let placeholder = if s.chat.is_some() { "Ask a follow-up…".to_string() }
+        else if let Some(c) = &crumb { format!("Search {}…", c.rsplit(" › ").next().unwrap_or(c)) }
+        else { "Search apps, calculate, or paste a URL…".to_string() };
     let field = text_input(&s.query, type_::TITLE.lh(28.0)).key("query").single_line().grow(1.0)
         .color(t.text).placeholder(placeholder, t.text_secondary)
         .on_edit(|s: &mut Tomboy| &mut s.query)
@@ -308,9 +355,14 @@ fn view(s: &Tomboy, cx: &mut Cx<Tomboy>) -> El {
     } else {
         text("⌕").font(type_::TITLE.lh(28.0)).color(t.text_secondary)
     };
-    let header = row().h(60.0).px(20.0).gap(14.0).center_y()
-        .child(glyph)
-        .child(field);
+    let mut header = row().h(60.0).px(20.0).gap(14.0).center_y().child(glyph);
+    if let Some(c) = crumb {
+        // The open submenu, as a chip; clicking it goes back up.
+        header = header.child(row().key("crumb").h(28.0).px(10.0).radius(7.0).center_y().fill(t.control_off)
+            .child(text(c).font(type_::LABEL).color(t.text))
+            .on_press(leave_submenu));
+    }
+    let header = header.child(field);
 
     let (body, left, action) = match &s.chat {
         Some(run) => chat_body(s, run, dark, &t),
@@ -337,6 +389,7 @@ fn results_body(s: &Tomboy, t: &tok::Theme, accent: Color) -> (El, String, (&'st
     for (i, item) in items.iter().enumerate() {
         let name = match item {
             Item::App(_) => "Applications",
+            Item::Menu(_) if s.submenu.is_some() => "Commands",
             Item::Menu(_) => s.platform.name(),
             Item::WebSearch(_) | Item::Agent(_) => "Fallback",
             _ => "Results",
@@ -354,7 +407,10 @@ fn results_body(s: &Tomboy, t: &tok::Theme, accent: Color) -> (El, String, (&'st
     }
     let body = col().w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(list);
     let action = items.get(s.picked).map(|it| it.action(s)).unwrap_or("");
-    let left = s.status.clone().unwrap_or_else(|| format!("tomboy · {}", s.platform.name()));
+    let left = s.status.clone().unwrap_or_else(|| match &s.submenu {
+        Some(_) => format!("tomboy · {} · esc to go back", s.platform.name()),
+        None => format!("tomboy · {}", s.platform.name()),
+    });
     (body, left, (action, "↵"))
 }
 
@@ -428,7 +484,17 @@ fn item_row(s: &Tomboy, item: &Item, i: usize, on: bool, t: &tok::Theme, accent:
             let title = if s.conds.checked(*m) { format!("{} ✓", entry.label) } else { entry.label.clone() };
             let crumb = entry.breadcrumb();
             let sub = entry.description.clone().or((!crumb.is_empty()).then_some(crumb));
-            (icon, title, sub, if entry.is_submenu() { "Submenu" } else { "Command" })
+            // Inside a submenu the breadcrumb is in the header; show it only for deeper rows.
+            let sub = match &s.submenu {
+                Some(open) => {
+                    let below = entry.parents.len().saturating_sub(open.split('.').count());
+                    entry.description.clone().or_else(|| (below > 0).then(|| entry.parents[entry.parents.len() - below..].join(" › ")))
+                }
+                None => sub,
+            };
+            let kind = if omarchy::has_children(&s.menu, &entry.id) { "Submenu ›" }
+                else if entry.is_submenu() { "Omarchy Menu" } else { "Command" };
+            (icon, title, sub, kind)
         }
     };
     let fg = if on { Color::WHITE } else { t.text };
@@ -476,6 +542,7 @@ fn main() {
             ("web", |s| s.query = TextEdit::new("rust rune ui")),
             ("omarchy", |s| s.query = TextEdit::new("bar")),
             ("chat", chat_scene),
+            ("submenu", |s| s.submenu = Some("learn".into())),
         ],
         ..AppSpec::new("tomboy", (WIDTH, HEIGHT), init, view)
     };

@@ -6,8 +6,6 @@
 //! existing ids. Rows carry shell conditions (`when`, `disabled`, `checked`) which run on a
 //! background pool; a row with a condition stays hidden until its check passes.
 
-#[cfg(test)]
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -216,11 +214,13 @@ pub fn run(item: &MenuItem, root: &Path) -> std::io::Result<()> {
 // ---- Search ------------------------------------------------------------------------------
 
 /// Rank visible rows against `query` (empty matches nothing); indices into `items`, best first.
-pub fn search(items: &[MenuItem], conds: &Conditions, query: &str, limit: usize) -> Vec<usize> {
+/// With `scope`, only rows under that submenu id count.
+pub fn search(items: &[MenuItem], conds: &Conditions, query: &str, scope: Option<&str>, limit: usize) -> Vec<usize> {
     let q = query.trim().to_lowercase();
     if q.is_empty() { return Vec::new(); }
+    let prefix = scope.map(|id| format!("{id}."));
     let mut scored: Vec<(u32, usize, usize)> = items.iter().enumerate()
-        .filter(|(i, _)| conds.visible(*i))
+        .filter(|(i, it)| conds.visible(*i) && prefix.as_deref().is_none_or(|p| it.id.starts_with(p)))
         .filter_map(|(i, it)| score(it, &q).map(|s| (s, it.parents.len(), i)))
         .collect();
     // Higher score first; shallower rows (Lock over Appearance › … › Lock) win ties.
@@ -250,15 +250,26 @@ fn score(it: &MenuItem, q: &str) -> Option<u32> {
     None
 }
 
-/// The ids under each id.
-#[cfg(test)]
-fn children(items: &[MenuItem]) -> HashMap<String, Vec<usize>> {
-    let mut map: HashMap<String, Vec<usize>> = HashMap::new();
-    for (i, it) in items.iter().enumerate() {
-        let parent = it.id.rsplit_once('.').map(|(p, _)| p.to_string()).unwrap_or_default();
-        map.entry(parent).or_default().push(i);
-    }
-    map
+fn parent_id(id: &str) -> &str {
+    id.rsplit_once('.').map_or("", |(p, _)| p)
+}
+
+/// The visible rows directly under submenu `parent`, in menu order.
+pub fn children_of(items: &[MenuItem], conds: &Conditions, parent: &str) -> Vec<usize> {
+    items.iter().enumerate()
+        .filter(|(i, it)| parent_id(&it.id) == parent && conds.visible(*i))
+        .map(|(i, _)| i).collect()
+}
+
+/// Whether the menu config lists rows under `id` (provider submenus fill theirs at runtime
+/// inside the Omarchy shell, so they have none here).
+pub fn has_children(items: &[MenuItem], id: &str) -> bool {
+    items.iter().any(|it| parent_id(&it.id) == id)
+}
+
+/// The submenu above `id`, `None` at the root.
+pub fn parent_of(id: &str) -> Option<&str> {
+    id.rsplit_once('.').map(|(p, _)| p)
 }
 
 #[cfg(test)]
@@ -287,18 +298,26 @@ mod tests {
         assert_eq!(hide.parents, ["Appearance", "Menu Bar"]);
         assert!(it.iter().all(|i| i.id != "apps"), "the apps provider is skipped");
         assert!(it.iter().find(|i| i.id == "system").unwrap().is_submenu());
-        assert_eq!(children(&it)["system"].len(), 1);
+        let shown = Conditions(Arc::new(it.iter().map(|_| AtomicU8::new(SHOWN)).collect()));
+        let ids = |v: Vec<usize>| v.into_iter().map(|i| it[i].id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(children_of(&it, &shown, "system")), ["system.lock"]);
+        assert_eq!(ids(children_of(&it, &shown, "")), ["system", "appearance"]);
+        assert!(has_children(&it, "appearance.top-bar") && !has_children(&it, "system.lock"));
+        assert_eq!(parent_of("appearance.top-bar"), Some("appearance"));
+        assert_eq!(parent_of("system"), None);
     }
 
     #[test]
     fn search_ranks_labels_then_breadcrumbs() {
         let it = items();
         let all_visible = Conditions(Arc::new(it.iter().map(|_| AtomicU8::new(SHOWN)).collect()));
-        let ids = |q| search(&it, &all_visible, q, 10).into_iter().map(|i| it[i].id.clone()).collect::<Vec<_>>();
+        let ids = |q| search(&it, &all_visible, q, None, 10).into_iter().map(|i| it[i].id.clone()).collect::<Vec<_>>();
         assert_eq!(ids("lock"), ["system.lock"]);
         assert_eq!(ids("bar hide")[0], "appearance.top-bar.hide");
         assert_eq!(ids("hide")[0], "appearance.top-bar.hide");
         assert!(ids("").is_empty());
+        let scoped = search(&it, &all_visible, "lock", Some("appearance"), 10);
+        assert!(scoped.is_empty(), "Lock is under System, not Appearance");
     }
 
     #[test]
