@@ -1,0 +1,13 @@
+[package]
+name = "tomboy"
+version = "0.1.0"
+edition = "2024"
+description = "A personal Raycast-style launcher built with Rune"
+
+[dependencies]
+# Rune is pre-release: pin a rev of `dev` (never rewritten).
+rune = { git = "https://github.com/anomalyco/rune", rev = "27497964979dfe6575adfd60a5cb8f3b85240b6f" }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+
+[profile.release]
+lto = "thin"
