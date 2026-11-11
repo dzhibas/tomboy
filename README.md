@@ -23,14 +23,8 @@ All OS commands live in `src/sys.rs` and `src/apps/{linux,macos}.rs` behind `#[c
   | `time in tokyo`, `now in utc`, `pst time` | `18:13` · `Asia/Tokyo · 6 hours ahead` — any city in the tz database, plus abbreviations |
   | `uuid`, `password 24`, `sha256 x`, `base64 x`, `b64d x`, `urlencode x`, `urldecode x`, `epoch`, `epoch 1787875351` | developer utilities; random values come from `/dev/urandom` and hold still until the next launch |
   | `kill chromium` | matching processes with pid, CPU and memory — Enter sends SIGTERM |
-- **Clipboard history**: `tomboy clipboard` (or type `clip` / `clipboard` / `paste` in the
-  launcher) lists what you copied, newest first: type to filter, ↑/↓ shows each clip in full on
-  the right (text in monospace, images as pictures), Enter puts it back on the clipboard and
-  closes. Copied files go back as files (`text/uri-list`), images as images. On Omarchy the
-  history is Omarchy's own (`~/.local/state/omarchy/clipboard-history.json`, recorded by the
-  shell); elsewhere run `tomboy clipboard-watch` at login to record
-  `~/.local/state/tomboy/clipboard-history.json` (Wayland `wl-paste --watch`, or `pbpaste`
-  polling on macOS; last 100 clips, password-manager copies skipped).
+- **Clipboard history**: `tomboy clipboard`, or type `clip` in the launcher — see
+  [Clipboard history](#clipboard-history).
 - **Omarchy**: on Omarchy (detected via `$OMARCHY_PATH` or `/usr/share/omarchy`), every entry of the
   Omarchy menu is searchable — `lock`, `theme`, `hide bar`, `install docker`. Omarchy's defaults
   are merged with `~/.config/omarchy/extensions/omarchy-menu.jsonc`; `when`/`disabled`/`checked`
@@ -50,6 +44,56 @@ All OS commands live in `src/sys.rs` and `src/apps/{linux,macos}.rs` behind `#[c
 
 ↑/↓ pick · Enter run · Esc or click away to close.
 
+## Clipboard history
+
+A Raycast-style clipboard manager: everything you copied, newest first, with a full preview.
+
+- **Open it**: run `tomboy clipboard` (bind it to a key, below), or type `clip`, `clipboard`,
+  `history` or `paste` in the launcher and press Enter on **Clipboard History**.
+- **Find a clip**: type to filter; every word must match (`git main` finds `git push origin main`).
+- **Preview**: ↑/↓ (or hover) picks a clip; the right pane shows it in full: text in monospace
+  (selectable), images and copied image files as pictures, with its size in the footer
+  (`Text · 3 lines · 45 characters`, `Image · PNG · 1920×1080`).
+- **Use it**: Enter (or click) puts the clip back on the clipboard and closes tomboy, so you
+  can paste it with Ctrl+V. Text goes back as text, images as images, copied files as files
+  (`text/uri-list`), so a file manager pastes the files themselves.
+- **Esc** clears the search, then closes (or returns to the launcher if you came from there).
+
+### Where the history comes from
+
+| Desktop | History | Recorded by |
+| --- | --- | --- |
+| Omarchy | `~/.local/state/omarchy/clipboard-history.json` | Omarchy's shell, already running; nothing to set up |
+| Other Wayland | `~/.local/state/tomboy/clipboard-history.json` | `tomboy clipboard-watch` (runs `wl-paste --watch`; needs `wl-clipboard`) |
+| macOS | `~/.local/state/tomboy/clipboard-history.json` | `tomboy clipboard-watch` (polls `pbpaste`, text only) |
+
+`tomboy clipboard-watch` keeps the last 100 clips, moves a repeated copy to the top instead of
+duplicating it, saves images under `~/.local/state/tomboy/clipboard-images/`, and skips copies
+password managers mark as sensitive. Start it once at login:
+
+```
+# ~/.config/hypr/hyprland.conf (not needed on Omarchy)
+exec-once = ~/Work/tomboy/target/release/tomboy clipboard-watch
+```
+
+### Bind it to a key in Hyprland
+
+Classic config (`~/.config/hypr/hyprland.conf` or a file it sources, such as `bindings.conf`):
+
+```
+bind = SUPER CTRL, V, exec, ~/Work/tomboy/target/release/tomboy clipboard
+```
+
+Omarchy's Lua config (`~/.config/hypr/bindings.lua`). SUPER+CTRL+V opens Omarchy's own
+clipboard panel by default, so `o.rebind` replaces it (use `o.bind` for a free key):
+
+```lua
+o.rebind("SUPER + CTRL + V", "Tomboy clipboard", "/home/me/Work/tomboy/target/release/tomboy clipboard")
+```
+
+Hyprland reloads the config on save; check it with `hyprctl configerrors`. The window floats
+on its own, like the launcher.
+
 ## Build & run
 
 ```sh
@@ -61,17 +105,15 @@ Bind it in Hyprland (e.g. `~/.config/hypr/bindings.conf`); the window floats on 
 
 ```
 bind = SUPER ALT, SPACE, exec, ~/Work/tomboy/target/release/tomboy
-bind = SUPER CTRL, V, exec, ~/Work/tomboy/target/release/tomboy clipboard
 ```
 
 On Omarchy's Lua config (`~/.config/hypr/bindings.lua`):
 
 ```lua
 o.rebind("SUPER + SPACE", "Tomboy launcher", "/home/me/Work/tomboy/target/release/tomboy")
-o.rebind("SUPER + CTRL + V", "Tomboy clipboard", "/home/me/Work/tomboy/target/release/tomboy clipboard")
 ```
 
-Off Omarchy, record the clipboard history at login (e.g. `exec-once = …/tomboy clipboard-watch`).
+For the clipboard history key, see [Bind it to a key in Hyprland](#bind-it-to-a-key-in-hyprland).
 
 ## Layout
 
