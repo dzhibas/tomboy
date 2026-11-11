@@ -30,26 +30,52 @@ pub fn open_url(url: &str) -> io::Result<()> {
 /// tomboy quits (on Wayland the clipboard dies with its owner). `Ok(false)` when no helper
 /// is installed, so the caller can copy in-process instead.
 pub fn copy_to_clipboard(text: &str) -> io::Result<bool> {
-    for argv in clipboard_helpers() {
-        let spawned = Command::new(argv[0]).args(&argv[1..])
+    copy_bytes(text.as_bytes(), None)
+}
+
+/// [`copy_to_clipboard`] for any MIME type (`image/png`, `text/uri-list`); `None` is plain text.
+pub fn copy_bytes(bytes: &[u8], mime: Option<&str>) -> io::Result<bool> {
+    #[cfg(target_os = "macos")]
+    if let Some(m) = mime.filter(|m| m.starts_with("image/")) { return copy_image_macos(bytes, m); }
+    for argv in clipboard_helpers(mime) {
+        let spawned = Command::new(&argv[0]).args(&argv[1..])
             .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
         let Ok(mut child) = spawned else { continue };
-        if let Some(mut stdin) = child.stdin.take() { stdin.write_all(text.as_bytes())?; }
+        if let Some(mut stdin) = child.stdin.take() { stdin.write_all(bytes)?; }
         return child.wait().map(|s| s.success());
     }
     Ok(false)
 }
 
 #[cfg(target_os = "linux")]
-fn clipboard_helpers() -> Vec<&'static [&'static str]> {
-    let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
-    let x11: [&'static [&'static str]; 2] = [&["xclip", "-selection", "clipboard"], &["xsel", "--clipboard", "--input"]];
-    if wayland { [&["wl-copy"][..]].into_iter().chain(x11).collect() } else { x11.into() }
+fn clipboard_helpers(mime: Option<&str>) -> Vec<Vec<String>> {
+    let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let mut helpers = Vec::new();
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        helpers.push(match mime { Some(m) => argv(&["wl-copy", "--type", m]), None => argv(&["wl-copy"]) });
+    }
+    helpers.push(match mime { Some(m) => argv(&["xclip", "-selection", "clipboard", "-t", m]),
+        None => argv(&["xclip", "-selection", "clipboard"]) });
+    // xsel has no MIME types.
+    if mime.is_none() { helpers.push(argv(&["xsel", "--clipboard", "--input"])); }
+    helpers
 }
 
 #[cfg(target_os = "macos")]
-fn clipboard_helpers() -> Vec<&'static [&'static str]> {
-    vec![&["pbcopy"]]
+fn clipboard_helpers(_mime: Option<&str>) -> Vec<Vec<String>> {
+    vec![vec!["pbcopy".into()]]
+}
+
+/// `pbcopy` only takes text; an image goes through AppleScript from a temporary file.
+#[cfg(target_os = "macos")]
+fn copy_image_macos(bytes: &[u8], mime: &str) -> io::Result<bool> {
+    let class = match mime { "image/png" => "PNGf", "image/jpeg" => "JPEG", "image/gif" => "GIFf", _ => "TIFF" };
+    let file = std::env::temp_dir().join(format!("tomboy-clip-{}", std::process::id()));
+    std::fs::write(&file, bytes)?;
+    let script = format!("set the clipboard to (read (POSIX file \"{}\") as «class {class}»)", file.display());
+    let status = Command::new("osascript").args(["-e", &script]).status();
+    let _ = std::fs::remove_file(&file);
+    status.map(|s| s.success())
 }
 
 /// Run `argv` in a new terminal window, starting in $HOME.

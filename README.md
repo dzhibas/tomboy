@@ -23,6 +23,14 @@ All OS commands live in `src/sys.rs` and `src/apps/{linux,macos}.rs` behind `#[c
   | `time in tokyo`, `now in utc`, `pst time` | `18:13` · `Asia/Tokyo · 6 hours ahead` — any city in the tz database, plus abbreviations |
   | `uuid`, `password 24`, `sha256 x`, `base64 x`, `b64d x`, `urlencode x`, `urldecode x`, `epoch`, `epoch 1787875351` | developer utilities; random values come from `/dev/urandom` and hold still until the next launch |
   | `kill chromium` | matching processes with pid, CPU and memory — Enter sends SIGTERM |
+- **Clipboard history**: `tomboy clipboard` (or type `clip` / `clipboard` / `paste` in the
+  launcher) lists what you copied, newest first: type to filter, ↑/↓ shows each clip in full on
+  the right (text in monospace, images as pictures), Enter puts it back on the clipboard and
+  closes. Copied files go back as files (`text/uri-list`), images as images. On Omarchy the
+  history is Omarchy's own (`~/.local/state/omarchy/clipboard-history.json`, recorded by the
+  shell); elsewhere run `tomboy clipboard-watch` at login to record
+  `~/.local/state/tomboy/clipboard-history.json` (Wayland `wl-paste --watch`, or `pbpaste`
+  polling on macOS; last 100 clips, password-manager copies skipped).
 - **Omarchy**: on Omarchy (detected via `$OMARCHY_PATH` or `/usr/share/omarchy`), every entry of the
   Omarchy menu is searchable — `lock`, `theme`, `hide bar`, `install docker`. Omarchy's defaults
   are merged with `~/.config/omarchy/extensions/omarchy-menu.jsonc`; `when`/`disabled`/`checked`
@@ -53,7 +61,17 @@ Bind it in Hyprland (e.g. `~/.config/hypr/bindings.conf`); the window floats on 
 
 ```
 bind = SUPER ALT, SPACE, exec, ~/Work/tomboy/target/release/tomboy
+bind = SUPER CTRL, V, exec, ~/Work/tomboy/target/release/tomboy clipboard
 ```
+
+On Omarchy's Lua config (`~/.config/hypr/bindings.lua`):
+
+```lua
+o.rebind("SUPER + SPACE", "Tomboy launcher", "/home/me/Work/tomboy/target/release/tomboy")
+o.rebind("SUPER + CTRL + V", "Tomboy clipboard", "/home/me/Work/tomboy/target/release/tomboy clipboard")
+```
+
+Off Omarchy, record the clipboard history at login (e.g. `exec-once = …/tomboy clipboard-watch`).
 
 ## Layout
 
@@ -66,6 +84,7 @@ bind = SUPER ALT, SPACE, exec, ~/Work/tomboy/target/release/tomboy
 | `src/dictation.rs` | Detecting Superwhisper dictation |
 | `src/agent.rs` | Handing a prompt to the coding agent |
 | `src/answers/` | Units, currency, time zones, developer utilities, kill process |
+| `src/clipboard.rs` | Clipboard history: reading, searching, copying back, recording |
 | `src/sys.rs` | OS commands: open URL, clipboard, detached spawn |
 | `src/calc.rs` | Expression evaluator |
 | `src/url.rs` | URL detection and opening |
