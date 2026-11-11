@@ -18,6 +18,7 @@ mod answers;
 mod apps;
 mod calc;
 mod clipboard;
+mod config;
 mod dictation;
 // Omarchy is Linux-only; on macOS the module compiles but `Platform::Omarchy` never occurs.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -85,6 +86,8 @@ struct Tomboy {
     clips: Option<Vec<Clip>>,
     /// Opened as `tomboy clipboard`: Esc closes instead of going back to the launcher.
     clips_direct: bool,
+    /// `~/.config/tomboy/config.toml`, read at launch.
+    config: config::Config,
     /// The picked clip's picture (kept here: the cache drops an image nobody holds).
     clip_image: Option<(std::path::PathBuf, Image)>,
 }
@@ -135,6 +138,8 @@ enum After {
 }
 
 fn init() -> Tomboy {
+    let (config, config_error) = config::load();
+    let status = config_error.or_else(|| config.warning());
     let mut query = TextEdit::new("");
     query.focused = true;
     let apps = apps::load_apps();
@@ -145,10 +150,10 @@ fn init() -> Tomboy {
     };
     let mut s = Tomboy {
         query, picked: 0, icons: vec![None; apps.len()], apps, cache: None,
-        platform, menu, conds: Conditions::default(), status: None,
+        platform, menu, conds: Conditions::default(), status,
         last_text: String::new(), dictated: Arc::default(), waker: None, chat: None, submenu: None,
         seed: answers::devtools::session_seed(), wake: Arc::new(|| {}),
-        clips: None, clips_direct: false, clip_image: None,
+        clips: None, clips_direct: false, clip_image: None, config,
     };
     if rune::extra_args().iter().any(|a| a == "clipboard") {
         enter_clipboard(&mut s);
@@ -293,7 +298,7 @@ fn ask_agent(s: &mut Tomboy, prompt: &str) -> std::io::Result<After> {
             if !agent::supports_headless(&name) {
                 return agent::ask(prompt, &s.platform).map(|()| After::Quit);
             }
-            agent::Run::new(name)
+            agent::Run::new(name, s.config.agent_dir())
         }
     };
     let waker = s.waker.clone();

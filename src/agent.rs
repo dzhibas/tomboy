@@ -6,6 +6,10 @@
 //!
 //! Claude streams `--output-format stream-json` events (text deltas, tool calls, a final
 //! result with cost); opencode, codex and crush print plain text, shown as it arrives.
+//!
+//! Every run carries tomboy's skill (`skill.md`: its config file and options), so the user can
+//! say "change the working directory to ~/sites" and the agent edits the config: claude gets
+//! it as an appended system prompt, the others ahead of the prompt.
 
 use std::io::{self, BufRead, BufReader};
 use std::path::PathBuf;
@@ -15,8 +19,12 @@ use std::time::Instant;
 
 use serde_json::Value;
 
+use crate::config;
 use crate::platform::Platform;
 use crate::sys;
+
+/// What the agent knows about tomboy: the config file and every option in it.
+pub const SKILL: &str = include_str!("skill.md");
 
 /// The agent CLI to use.
 pub fn name(platform: &Platform) -> String {
@@ -56,30 +64,27 @@ pub fn supports_headless(agent: &str) -> bool {
 }
 
 /// The headless command for `agent`. Like Omarchy's own launcher, agents run unattended.
-fn headless_argv(agent: &str, prompt: &str, resume: Option<&str>) -> Option<Vec<String>> {
+/// Claude may also edit `config_dir` (tomboy's config), outside its working directory.
+fn headless_argv(agent: &str, prompt: &str, resume: Option<&str>, config_dir: Option<&std::path::Path>) -> Option<Vec<String>> {
     let s = |v: &[&str]| v.iter().map(|a| a.to_string()).collect::<Vec<_>>();
     let mut argv = match agent {
         "claude" => {
             let mut a = s(&["claude", "-p", "--output-format", "stream-json", "--include-partial-messages",
-                "--verbose", "--permission-mode", "auto"]);
+                "--verbose", "--permission-mode", "auto", "--append-system-prompt", SKILL]);
+            if let Some(dir) = config_dir { a.extend(["--add-dir".into(), dir.display().to_string()]); }
             if let Some(id) = resume { a.extend(s(&["--resume", id])); }
             a.push("--".into());
-            a
+            a.push(prompt.to_string());
+            return Some(a);
         }
         "opencode" => s(&["opencode", "run", "--auto", "--"]),
         "codex" => s(&["codex", "exec", "--"]),
         "crush" => s(&["crush", "run"]),
         _ => return None,
     };
-    argv.push(prompt.to_string());
+    // No system prompt flag shared by these; each turn is a fresh run, so the skill leads it.
+    argv.push(format!("{SKILL}\n---\n\nThe user's request:\n\n{prompt}"));
     Some(argv)
-}
-
-/// Agents start in ~/Work when it exists (agents won't remember trust for $HOME).
-fn work_dir() -> Option<PathBuf> {
-    let home = sys::home_dir()?;
-    let work = home.join("Work");
-    Some(if work.is_dir() { work } else { home })
 }
 
 // ---- Transcript ----------------------------------------------------------------------------
@@ -114,6 +119,8 @@ pub struct Transcript {
     /// Bumped by every turn, so a finished turn's reader can't touch the next turn's state.
     turn: u64,
     started: Instant,
+    /// Where the agent runs.
+    dir: Option<PathBuf>,
 }
 
 impl Transcript {
@@ -142,16 +149,18 @@ impl Transcript {
 pub struct Run(Arc<Mutex<Transcript>>);
 
 impl Run {
-    pub fn new(agent: String) -> Self {
+    /// `dir` is where the agent runs (`[agent] working_directory`, else ~/Work, else ~); it
+    /// stays for the whole conversation, since a resumed session belongs to its directory.
+    pub fn new(agent: String, dir: Option<PathBuf>) -> Self {
         Run(Arc::new(Mutex::new(Transcript {
-            agent, blocks: Vec::new(), status: Status::Done { secs: 0.0, cost_usd: None },
+            agent, dir, blocks: Vec::new(), status: Status::Done { secs: 0.0, cost_usd: None },
             session: None, pgid: None, turn: 0, started: Instant::now(),
         })))
     }
 
     /// A finished transcript, for headless snapshots.
     pub fn demo(agent: &str, blocks: &[Block], status: Status) -> Self {
-        let run = Run::new(agent.into());
+        let run = Run::new(agent.into(), None);
         { let mut t = run.lock(); t.blocks = blocks.to_vec(); t.status = status; }
         run
     }
@@ -163,16 +172,19 @@ impl Run {
     /// Start a turn: run the agent on `prompt` (continuing the session when there is one) and
     /// stream its output into the transcript, calling `wake` whenever it changes.
     pub fn start(&self, prompt: &str, wake: impl Fn() + Send + Sync + 'static) -> io::Result<()> {
-        let (agent, session) = {
+        let (agent, session, dir) = {
             let t = self.lock();
-            (t.agent.clone(), t.session.clone())
+            (t.agent.clone(), t.session.clone(), t.dir.clone())
         };
-        let argv = headless_argv(&agent, prompt, session.as_deref())
+        // Make sure the config directory exists so the agent may write config.toml into it.
+        let config_dir = config::path().and_then(|p| p.parent().map(PathBuf::from))
+            .filter(|d| std::fs::create_dir_all(d).is_ok());
+        let argv = headless_argv(&agent, prompt, session.as_deref(), config_dir.as_deref())
             .ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, format!("{agent} has no headless mode")))?;
         let mut cmd = Command::new(&argv[0]);
         cmd.args(&argv[1..]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
         std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
-        if let Some(dir) = work_dir() { cmd.current_dir(dir); }
+        if let Some(dir) = dir { cmd.current_dir(dir); }
         let mut child = cmd.spawn()?;
         let turn = {
             let mut t = self.lock();
@@ -292,7 +304,7 @@ mod tests {
 
     fn transcript() -> Transcript {
         Transcript { agent: "claude".into(), blocks: vec![Block::Prompt("hi".into())], status: Status::Running,
-            session: None, pgid: None, turn: 1, started: Instant::now() }
+            session: None, pgid: None, turn: 1, started: Instant::now(), dir: None }
     }
 
     #[test]
@@ -330,9 +342,12 @@ mod tests {
 
     #[test]
     fn headless_commands() {
-        assert_eq!(headless_argv("claude", "hi", Some("s1")).unwrap()[8..], ["--resume", "s1", "--", "hi"]);
-        assert_eq!(headless_argv("codex", "-x", None).unwrap(), ["codex", "exec", "--", "-x"]);
-        assert!(headless_argv("hermes", "hi", None).is_none());
+        let claude = headless_argv("claude", "hi", Some("s1"), Some(std::path::Path::new("/c/tomboy"))).unwrap();
+        assert_eq!(claude[8..], ["--append-system-prompt", SKILL, "--add-dir", "/c/tomboy", "--resume", "s1", "--", "hi"]);
+        let codex = headless_argv("codex", "-x", None, None).unwrap();
+        assert_eq!(codex[..3], ["codex", "exec", "--"]);
+        assert!(codex[3].starts_with(SKILL) && codex[3].ends_with("\n\n-x"));
+        assert!(headless_argv("hermes", "hi", None, None).is_none());
         assert!(supports_headless("opencode") && !supports_headless("pi"));
     }
 
@@ -340,7 +355,7 @@ mod tests {
     #[test]
     #[ignore]
     fn live_claude_streams_an_answer_and_a_follow_up() {
-        let run = Run::new("claude".into());
+        let run = Run::new("claude".into(), None);
         let wait = |run: &Run| {
             let deadline = Instant::now() + std::time::Duration::from_secs(120);
             while run.lock().is_running() && Instant::now() < deadline {
@@ -365,7 +380,7 @@ mod tests {
 
     #[test]
     fn plain_text_lines_join_into_one_answer() {
-        let run = Run::new("crush".into());
+        let run = Run::new("crush".into(), None);
         let mut t = run.lock();
         t.push_text("a\n");
         t.push_text("b\n");

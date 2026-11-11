@@ -32,7 +32,8 @@ All OS commands live in `src/sys.rs` and `src/apps/{linux,macos}.rs` behind `#[c
   submenus the shell fills at runtime open via `omarchy-menu summon <id>`.
   `TOMBOY_PLATFORM=generic` turns this off.
 - **Agent, inside tomboy**: "Ask agent" runs the coding agent headless — Omarchy's default
-  (`omarchy-default-agent`), else `$TOMBOY_AGENT` (default `claude`) — in `~/Work`, and streams
+  (`omarchy-default-agent`), else `$TOMBOY_AGENT` (default `claude`) — in `~/Work` (or the
+  [configured](#configuration) directory), and streams
   its answer into the window as Markdown, with tool calls, time and cost. The field then takes
   follow-ups in the same session (claude `--resume`). Enter on an empty field copies the
   answer; Esc stops a running agent, a second Esc closes. Claude streams JSON events;
@@ -43,6 +44,38 @@ All OS commands live in `src/sys.rs` and `src/apps/{linux,macos}.rs` behind `#[c
 - **Fallback**: anything else offers "Ask agent" and a DuckDuckGo search.
 
 ↑/↓ pick · Enter run · Esc or click away to close.
+
+## Configuration
+
+tomboy works with no config. To change a setting, create `~/.config/tomboy/config.toml`
+(`$XDG_CONFIG_HOME/tomboy/config.toml` when that is set); anything left out keeps its default.
+tomboy reads it when it opens, so a change applies on the next launch.
+
+```toml
+[agent]
+# Where "Ask agent" runs the coding agent. Default: ~/Work, or ~ when that doesn't exist.
+working_directory = "~/sites"
+```
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `agent.working_directory` | `~/Work`, else `~` | The agent's working directory. `~` is home; relative paths start at home. A missing directory falls back to the default. |
+
+A file that doesn't parse, or has an unknown key, is ignored as a whole; the footer says why
+(`config.toml ignored: unknown field …`).
+
+### Changing it by asking the agent
+
+Every agent run carries tomboy's skill ([`src/skill.md`](src/skill.md), built into the binary):
+what the config file is, every option, and how to edit it safely. So you can say (or dictate)
+in the launcher:
+
+> change the working directory to ~/sites
+
+and the agent writes `config.toml` for you and tells you it applies on the next launch. Claude
+gets the skill as an appended system prompt (`--append-system-prompt`, with `--add-dir
+~/.config/tomboy` so it may write there); opencode, codex and crush get it ahead of the prompt.
+When you add an option, document it in `src/skill.md` too.
 
 ## Clipboard history
 
@@ -127,6 +160,8 @@ For the clipboard history key, see [Bind it to a key in Hyprland](#bind-it-to-a-
 | `src/agent.rs` | Handing a prompt to the coding agent |
 | `src/answers/` | Units, currency, time zones, developer utilities, kill process |
 | `src/clipboard.rs` | Clipboard history: reading, searching, copying back, recording |
+| `src/config.rs` | `~/.config/tomboy/config.toml`: loading and defaults |
+| `src/skill.md` | What the agent knows about tomboy's config (sent with every agent run) |
 | `src/sys.rs` | OS commands: open URL, clipboard, detached spawn |
 | `src/calc.rs` | Expression evaluator |
 | `src/url.rs` | URL detection and opening |
