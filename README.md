@@ -14,10 +14,20 @@ All OS commands live in `src/sys.rs` and `src/apps/{linux,macos}.rs` behind `#[c
 - **Apps**: type to fuzzy-search installed `.desktop` applications; Enter launches (via `uwsm app --` when available).
 - **Calculator**: `2+2`, `(2+2)*10/3`, `sqrt(16)`, `2^10`, `sin(pi/2)` — Enter copies the answer (`wl-copy`).
 - **URLs**: `github.com/anomalyco/rune`, `https://…`, `localhost:3000` — Enter opens the browser (`xdg-open`).
+- **Answers** (`src/answers/`) — Enter copies the answer:
+
+  | Type | Get |
+  | --- | --- |
+  | `100 km to miles`, `20 c to f`, `1 tb to gib`, `2 cup to ml` | `62.1371 mi` — length, mass, volume, temperature, data (decimal and binary), speed, time, area |
+  | `123 eur to usd`, `$120 to eur`, `50 euros to dollars`, `eur to usd` | `143.31 USD` — 166 currencies; rates from open.er-api.com, fetched on the first conversion typed, cached a day in `~/.cache/tomboy/` |
+  | `time in tokyo`, `now in utc`, `pst time` | `18:13` · `Asia/Tokyo · 6 hours ahead` — any city in the tz database, plus abbreviations |
+  | `uuid`, `password 24`, `sha256 x`, `base64 x`, `b64d x`, `urlencode x`, `urldecode x`, `epoch`, `epoch 1787875351` | developer utilities; random values come from `/dev/urandom` and hold still until the next launch |
+  | `kill chromium` | matching processes with pid, CPU and memory — Enter sends SIGTERM |
 - **Omarchy**: on Omarchy (detected via `$OMARCHY_PATH` or `/usr/share/omarchy`), every entry of the
   Omarchy menu is searchable — `lock`, `theme`, `hide bar`, `install docker`. Omarchy's defaults
   are merged with `~/.config/omarchy/extensions/omarchy-menu.jsonc`; `when`/`disabled`/`checked`
-  conditions run in the background; submenus open via `omarchy-menu summon <id>`.
+  conditions run in the background. Enter on a submenu browses it inside tomboy (Esc goes back);
+  submenus the shell fills at runtime open via `omarchy-menu summon <id>`.
   `TOMBOY_PLATFORM=generic` turns this off.
 - **Agent, inside tomboy**: "Ask agent" runs the coding agent headless — Omarchy's default
   (`omarchy-default-agent`), else `$TOMBOY_AGENT` (default `claude`) — in `~/Work`, and streams
@@ -55,13 +65,15 @@ bind = SUPER ALT, SPACE, exec, ~/Work/tomboy/target/release/tomboy
 | `src/apps/macos.rs` | `.app` bundle scanning and launching |
 | `src/dictation.rs` | Detecting Superwhisper dictation |
 | `src/agent.rs` | Handing a prompt to the coding agent |
+| `src/answers/` | Units, currency, time zones, developer utilities, kill process |
 | `src/sys.rs` | OS commands: open URL, clipboard, detached spawn |
 | `src/calc.rs` | Expression evaluator |
 | `src/url.rs` | URL detection and opening |
 | `src/platform.rs` | Platform detection (Omarchy / generic Linux) |
 | `src/omarchy.rs` | Omarchy menu loading (JSONC), conditions, search, running |
 
-Type-check the macOS build from Linux (blake3's C code needs the macOS SDK, so use its pure-Rust path):
+Type-check the macOS build from Linux (blake3's C code needs the macOS SDK, so use its pure-Rust path).
+This currently stops at `ring` (ureq's TLS), whose C code also needs the SDK; build on a Mac for a full check:
 
 ```sh
 rustup target add aarch64-apple-darwin
@@ -73,6 +85,6 @@ CARGO_FEATURE_PURE=1 cargo check --target aarch64-apple-darwin
 ```sh
 cargo test
 cargo test live_claude -- --ignored   # runs the real claude CLI (tiny paid request)
-cargo run -- --snap shot.png --scene calc   # scenes: apps calc url web omarchy chat
+cargo run -- --snap shot.png --scene calc   # scenes: apps calc url web omarchy chat submenu units time dev kill currency
 cargo run -- --tree tree.json --scene apps
 ```

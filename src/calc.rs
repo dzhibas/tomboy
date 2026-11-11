@@ -280,6 +280,23 @@ pub fn eval(input: &str) -> Option<f64> {
     Some(v)
 }
 
+/// Evaluate an amount: like `eval`, but a bare number or constant (`123`, `1.5`,
+/// `(20+5)`, `pi`) is accepted too. Returns `None` on parse errors or a non-finite result.
+pub fn eval_amount(input: &str) -> Option<f64> {
+    let s = input.trim();
+    let s = s.strip_suffix('=').unwrap_or(s).trim_end();
+    if s.is_empty() {
+        return None;
+    }
+    let toks = tokenize(s)?;
+    let mut p = Parser { toks, pos: 0, did_op: false };
+    let v = p.expr()?;
+    if p.pos != p.toks.len() || !v.is_finite() {
+        return None;
+    }
+    Some(v)
+}
+
 /// Format a result for display: plain digits, no thousands separators.
 pub fn format(v: f64) -> String {
     if v.is_nan() {
@@ -395,6 +412,21 @@ mod tests {
         ] {
             assert_eq!(eval(s), None, "{s:?}");
         }
+    }
+
+    #[test]
+    fn amounts() {
+        assert_eq!(eval_amount("123"), Some(123.0));
+        assert_eq!(eval_amount(" 1.5 "), Some(1.5));
+        assert_eq!(eval_amount("(20+5)"), Some(25.0));
+        assert_eq!(eval_amount("-2"), Some(-2.0));
+        assert_eq!(eval_amount("2*3"), Some(6.0));
+        assert_eq!(eval_amount("1_000"), Some(1000.0));
+        for s in ["", "1,000", "1/0", "0/0", "km", "2 +", "(2", "2 3"] {
+            assert_eq!(eval_amount(s), None, "{s:?}");
+        }
+        // `eval` still rejects bare values.
+        assert_eq!(eval("123"), None);
     }
 
     #[test]

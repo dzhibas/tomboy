@@ -11,6 +11,7 @@
 //!   cargo run -- --tree tree.json --scene apps
 
 mod agent;
+mod answers;
 mod apps;
 mod calc;
 mod dictation;
@@ -31,6 +32,7 @@ use rune_kit::{Markdown, MarkdownStyle};
 use std::sync::{Arc, Mutex};
 
 use agent::{Block, Status};
+use answers::{Answer, Kind};
 use apps::AppEntry;
 use omarchy::{Conditions, MenuItem};
 use platform::Platform;
@@ -69,12 +71,18 @@ struct Tomboy {
     chat: Option<agent::Run>,
     /// The Omarchy submenu being browsed (`install`, `appearance.top-bar`); `None` at the root.
     submenu: Option<String>,
+    /// Random bytes for this launch, so `uuid`/`password` answers hold still while typing.
+    seed: [u8; 32],
+    /// Wakes the window when a background answer (currency rates) arrives.
+    wake: answers::Wake,
 }
 
 /// One row in the result list.
 #[derive(Clone, Debug, PartialEq)]
 enum Item {
     Calc { expr: String, value: String },
+    /// Unit/currency conversion, time zone, developer utility or process.
+    Answer(Answer),
     Url(String),
     App(usize),
     Menu(usize),
@@ -86,6 +94,11 @@ impl Item {
     fn action(&self, s: &Tomboy) -> &'static str {
         match self {
             Item::Calc { .. } => "Copy Answer",
+            Item::Answer(a) => match a.action {
+                answers::Action::Copy(_) => "Copy Answer",
+                answers::Action::Kill { .. } => "Kill Process",
+                answers::Action::None => "",
+            },
             Item::Url(_) => "Open in Browser",
             Item::App(_) => "Open Application",
             Item::Menu(i) if omarchy::has_children(&s.menu, &s.menu[*i].id) => "Open Submenu",
@@ -116,6 +129,7 @@ fn init() -> Tomboy {
         query, picked: 0, icons: vec![None; apps.len()], apps, cache: None,
         platform, menu, conds: Conditions::default(), status: None,
         last_text: String::new(), dictated: Arc::default(), waker: None, chat: None, submenu: None,
+        seed: answers::devtools::session_seed(), wake: Arc::new(|| {}),
     }
 }
 
@@ -129,6 +143,7 @@ fn setup(s: &mut Tomboy, waker: Waker) {
         let waker = waker.clone();
         s.conds = omarchy::evaluate(&s.menu, root, move || waker());
     }
+    s.wake = waker.clone();
     s.waker = Some(waker);
 }
 
@@ -174,13 +189,14 @@ fn results(s: &Tomboy) -> Vec<Item> {
     if let Some(v) = calc::eval(q) {
         items.push(Item::Calc { expr: q.to_string(), value: calc::format(v) });
     }
+    items.extend(answers::collect(&s.query.text, &s.seed, &s.wake).into_iter().map(Item::Answer));
     if let Some(u) = url::detect(q) {
         items.push(Item::Url(u));
     }
     let app_limit = if q.is_empty() { MAX_APPS } else { MAX_APP_HITS };
     items.extend(apps::search(&s.apps, q, app_limit).into_iter().map(Item::App));
     items.extend(omarchy::search(&s.menu, &s.conds, q, None, MAX_MENU_HITS).into_iter().map(Item::Menu));
-    if !q.is_empty() && !matches!(items.first(), Some(Item::Calc { .. } | Item::Url(_))) {
+    if !q.is_empty() && !matches!(items.first(), Some(Item::Calc { .. } | Item::Answer(_) | Item::Url(_))) {
         items.push(Item::Agent(q.to_string()));
         items.push(Item::WebSearch(q.to_string()));
     }
@@ -193,6 +209,17 @@ fn run_item(s: &mut Tomboy, item: &Item, tx: &mut Tx) {
             s.status = Some(format!("Copied {value}"));
             After::Stay
         }),
+        Item::Answer(a) => match &a.action {
+            answers::Action::Copy(v) => copy_text(v, tx).map(|()| {
+                s.status = Some(format!("Copied {v}"));
+                After::Stay
+            }),
+            answers::Action::Kill { pid, name } => answers::kill::terminate(*pid).map(|()| {
+                s.status = Some(format!("Sent SIGTERM to {name} ({pid})"));
+                After::Stay
+            }),
+            answers::Action::None => Ok(After::Stay),
+        },
         Item::Url(u) => url::open(u).map(|()| After::Quit),
         Item::App(i) => apps::launch(&s.apps[*i]).map(|()| After::Quit),
         // A submenu opens inside tomboy; one the shell fills at runtime (Fonts) has no rows
@@ -392,6 +419,7 @@ fn results_body(s: &Tomboy, t: &tok::Theme, accent: Color) -> (El, String, (&'st
             Item::Menu(_) if s.submenu.is_some() => "Commands",
             Item::Menu(_) => s.platform.name(),
             Item::WebSearch(_) | Item::Agent(_) => "Fallback",
+            Item::Answer(a) if a.kind == Kind::Process => "Processes",
             _ => "Results",
         };
         if section != Some(name) {
@@ -464,6 +492,10 @@ fn item_row(s: &Tomboy, item: &Item, i: usize, on: bool, t: &tok::Theme, accent:
     let (icon, title, subtitle, kind): (El, String, Option<String>, &str) = match item {
         Item::Calc { expr, value } => (glyph("=", Color { r: 1.0, g: 0.58, b: 0.0, a: 1.0 }),
             value.clone(), Some(expr.clone()), "Calculator"),
+        Item::Answer(a) => {
+            let (g, c, label) = answer_style(a.kind);
+            (glyph_in(g, c, Some(NERD_FONT)), a.title.clone(), Some(a.subtitle.clone()), label)
+        }
         Item::Url(u) => (glyph("↗", Color { r: 0.2, g: 0.5, b: 1.0, a: 1.0 }), u.clone(), None, "Open URL"),
         Item::Agent(q) => (glyph_in(AGENT_GLYPH, AGENT_COLOR, Some(NERD_FONT)), format!("Ask agent: “{q}”"), None, "Agent"),
         Item::WebSearch(q) => (glyph("⌕", Color { r: 0.45, g: 0.45, b: 0.5, a: 1.0 }),
@@ -514,6 +546,18 @@ fn item_row(s: &Tomboy, item: &Item, i: usize, on: bool, t: &tok::Theme, accent:
         .on_press_tx(move |s: &mut Tomboy, tx: &mut Tx| { s.picked = i; run_item(s, &item, tx); })
 }
 
+/// Icon (Nerd Font), icon colour and right-hand label for an answer row.
+fn answer_style(kind: Kind) -> (&'static str, Color, &'static str) {
+    let rgb = |r, g, b| Color { r, g, b, a: 1.0 };
+    match kind {
+        Kind::Units => ("\u{f046d}", rgb(0.30, 0.65, 0.45), "Convert"),        // nf-md-ruler
+        Kind::Currency => ("\u{f01c1}", rgb(0.20, 0.60, 0.35), "Currency"),    // nf-md-currency_usd
+        Kind::Time => ("\u{f017}", rgb(0.35, 0.50, 0.95), "Time"),             // nf-fa-clock_o
+        Kind::Dev => ("\u{f121}", rgb(0.55, 0.40, 0.85), "Developer"),         // nf-fa-code
+        Kind::Process => ("\u{f068c}", rgb(0.85, 0.30, 0.30), "Process"),      // nf-md-skull
+    }
+}
+
 /// A finished conversation for the headless `chat` scene.
 fn chat_scene(s: &mut Tomboy) {
     let run = agent::Run::demo("claude", &[
@@ -543,6 +587,11 @@ fn main() {
             ("omarchy", |s| s.query = TextEdit::new("bar")),
             ("chat", chat_scene),
             ("submenu", |s| s.submenu = Some("learn".into())),
+            ("units", |s| s.query = TextEdit::new("100 km to miles")),
+            ("time", |s| s.query = TextEdit::new("time in tokyo")),
+            ("dev", |s| s.query = TextEdit::new("password 24")),
+            ("kill", |s| s.query = TextEdit::new("kill sleep")),
+            ("currency", |s| s.query = TextEdit::new("123 eur to usd")),
         ],
         ..AppSpec::new("tomboy", (WIDTH, HEIGHT), init, view)
     };
