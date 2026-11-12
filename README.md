@@ -218,6 +218,8 @@ Two small things in `config.toml` that save typing.
 gh = "https://github.com/search?q={query}"
 jira = { url = "issues.jira.com/browse/{issue}", name = "Jira issue" }
 yt = "https://www.youtube.com/results?search_query={q}"
+google = { url = "https://www.google.com/?q={q}", name = "google" }
+translate = { url = "https://translate.google.com/?sl=auto&tl=en&text={text}&op=translate", name = "Google Translate" }
 news = "https://news.ycombinator.com"   # no {…}: a bookmark
 ```
 
