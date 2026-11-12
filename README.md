@@ -52,7 +52,7 @@ up instantly, and it records your clipboard history.
    | Hotkey | Opens |
    | --- | --- |
    | ⌥Space | the launcher |
-   | ⌃⌥V | clipboard history |
+   | ⌘⇧C | clipboard history |
    | ⌃⌥E | emoji & symbols |
    | ⌃⌥T | today's todos |
 
@@ -190,7 +190,7 @@ paste = false
 | `quicklinks.<keyword>` | none | A URL pattern opened by a keyword, see [Quicklinks & aliases](#quicklinks--aliases). |
 | `aliases.<word>` | none | Another word for an app, command or quicklink, see [Quicklinks & aliases](#quicklinks--aliases). |
 | `todo.directory` | `~/Documents/tomboy/todo` | Where the daily todo lists live, see [Todos](#todos). |
-| `hotkeys.launcher` / `clipboard` / `emoji` / `todo` | `alt+space` / `ctrl+alt+v` / `ctrl+alt+e` / `ctrl+alt+t` | macOS only: the daemon's global shortcuts (`cmd`, `ctrl`, `alt`, `shift` + a key). `""` turns one off. Read when the daemon starts: run `tomboy install-launch-agent` again to apply. |
+| `hotkeys.launcher` / `clipboard` / `emoji` / `todo` | `alt+space` / `cmd+shift+c` / `ctrl+alt+e` / `ctrl+alt+t` | macOS only: the daemon's global shortcuts (`cmd`, `ctrl`, `alt`, `shift` + a key). `""` turns one off. Read when the daemon starts: run `tomboy install-launch-agent` again to apply. |
 | `clipboard.paste` | `true` | macOS only: after a clip or emoji is picked, paste it into the app in front (needs the Accessibility permission). `false` only copies. |
 
 A file that doesn't parse, or has an unknown key, is ignored as a whole; the footer says why

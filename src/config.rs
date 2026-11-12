@@ -37,7 +37,7 @@
 //! [hotkeys]
 //! # macOS (`tomboy daemon`): global shortcuts; "" turns one off. Defaults below.
 //! launcher = "alt+space"
-//! clipboard = "ctrl+alt+v"
+//! clipboard = "cmd+shift+c"
 //!
 //! [clipboard]
 //! # macOS: Enter on a clip or emoji also pastes it into the app in front. Default true.
@@ -94,7 +94,7 @@ pub enum Hotkey { Launcher, Clipboard, Emoji, Todo }
 impl Hotkey {
     pub const ALL: [Hotkey; 4] = [Hotkey::Launcher, Hotkey::Clipboard, Hotkey::Emoji, Hotkey::Todo];
     pub fn default_chord(self) -> &'static str {
-        match self { Hotkey::Launcher => "alt+space", Hotkey::Clipboard => "ctrl+alt+v", Hotkey::Emoji => "ctrl+alt+e", Hotkey::Todo => "ctrl+alt+t" }
+        match self { Hotkey::Launcher => "alt+space", Hotkey::Clipboard => "cmd+shift+c", Hotkey::Emoji => "ctrl+alt+e", Hotkey::Todo => "ctrl+alt+t" }
     }
 }
 
@@ -309,7 +309,7 @@ mod tests {
         assert_eq!(err, None);
         assert_eq!(c.hotkey(Hotkey::Launcher).as_deref(), Some("cmd+space"));
         assert_eq!(c.hotkey(Hotkey::Emoji), None);
-        assert_eq!(c.hotkey(Hotkey::Clipboard).as_deref(), Some("ctrl+alt+v"));
+        assert_eq!(c.hotkey(Hotkey::Clipboard).as_deref(), Some("cmd+shift+c"));
         assert!(!c.paste());
     }
 
