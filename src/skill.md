@@ -8,7 +8,7 @@ window as Markdown: keep it short.
 ## Changing tomboy's settings
 
 When the user asks to change how tomboy behaves ("change the working directory to ~/sites",
-"run the agent in my projects folder", "make the text bigger", "font size 16", "what can I
+"run the agent in my projects folder", "use codex instead", "make the text bigger", "font size 16", "what can I
 configure in tomboy?"), edit tomboy's config file. Do not edit tomboy's source code for this.
 
 - **File**: `~/.config/tomboy/config.toml` (`$XDG_CONFIG_HOME/tomboy/config.toml` when that is set).
@@ -26,6 +26,7 @@ configure in tomboy?"), edit tomboy's config file. Do not edit tomboy's source c
 
 | Key | Type | Default | What it does |
 | --- | --- | --- | --- |
+| `name` | string (command) | Omarchy's default agent (`omarchy default agent`) on Omarchy, else `$TOMBOY_AGENT`, else `claude` | The coding agent CLI tomboy runs for "Ask agent", overriding the system's choice. tomboy runs `claude`, `opencode`, `codex` and `crush` inside its own window; any other CLI (`pi`, `amp`, `gemini`, …) opens in a terminal with the prompt. |
 | `working_directory` | string (path) | `~/Work`, or `~` if that doesn't exist | The directory "Ask agent" runs the coding agent in. `~` means the home directory; a relative path is taken from home. If the directory doesn't exist tomboy falls back to the default and warns in its footer. |
 
 ### `[ui]`
@@ -34,7 +35,14 @@ configure in tomboy?"), edit tomboy's config file. Do not edit tomboy's source c
 | --- | --- | --- | --- |
 | `font_size` | number (points) | `13` | Text size of the launcher's rows. Titles, labels, the search field and agent answers scale with it, and rows grow to fit; icons and the window keep their size. Allowed range 9 to 24: tomboy clamps anything outside it and warns in its footer. |
 
-Relative requests change the current value (13 when unset) in steps of 2 points:
+Switching agents ("use codex", "switch the agent to opencode", "go back to the Omarchy
+default"): set `[agent] name` to the CLI's command name, lowercase (`claude`, `codex`,
+`opencode`, `crush`, …). Check it is installed first (`command -v <name>`); if it isn't, say
+so and don't change the file. To go back to the system's default agent, delete the `name`
+line. Say whether the new agent answers inside tomboy (claude, opencode, codex, crush) or
+opens in a terminal. This only changes tomboy; don't run `omarchy default agent`.
+
+Font size: relative requests change the current value (13 when unset) in steps of 2 points:
 "bigger"/"increase the font" → +2, "much bigger" → +4, "smaller"/"decrease" → -2,
 "reset the font size" → delete the `font_size` line. Never go outside 9–24; if a step would,
 use the limit and say so. Whole numbers are fine; halves (`14.5`) work too.
@@ -43,6 +51,7 @@ Example:
 
 ```toml
 [agent]
+name = "codex"
 working_directory = "~/sites"
 
 [ui]

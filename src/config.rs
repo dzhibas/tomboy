@@ -4,6 +4,8 @@
 //!
 //! ```toml
 //! [agent]
+//! # The agent CLI to use. Default: Omarchy's default agent, else $TOMBOY_AGENT, else claude.
+//! name = "codex"
 //! # Where "Ask agent" runs the coding agent. Default: ~/Work, or ~ when that doesn't exist.
 //! working_directory = "~/sites"
 //!
@@ -42,6 +44,8 @@ pub struct UiConfig {
 #[derive(Debug, Default, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct AgentConfig {
+    /// The agent CLI to use (`claude`, `codex`, …), instead of Omarchy's default or `$TOMBOY_AGENT`.
+    pub name: Option<String>,
     /// Where the agent runs; `~` expands to $HOME.
     pub working_directory: Option<String>,
 }
@@ -118,8 +122,9 @@ mod tests {
     #[test]
     fn parses_and_defaults() {
         assert_eq!(parse("").0, Config::default());
-        let (c, err) = parse("[agent]\nworking_directory = \"~/sites\"\n");
+        let (c, err) = parse("[agent]\nname = \"codex\"\nworking_directory = \"~/sites\"\n");
         assert_eq!(err, None);
+        assert_eq!(c.agent.name.as_deref(), Some("codex"));
         assert_eq!(c.agent.working_directory.as_deref(), Some("~/sites"));
         let (c, err) = parse("[agent]\nworking_dir = \"x\"\n");
         assert_eq!(c, Config::default());

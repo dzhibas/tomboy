@@ -1,7 +1,7 @@
 //! Running a coding agent on a prompt.
 //!
-//! The agent is Omarchy's default (`omarchy-default-agent`) on Omarchy, else `$TOMBOY_AGENT`
-//! (default `claude`). [`Run::start`] runs it headless and streams its answer into a shared
+//! The agent is `[agent] name` from tomboy's config when set, else Omarchy's default
+//! (`omarchy-default-agent`) on Omarchy, else `$TOMBOY_AGENT` (default `claude`). [`Run::start`] runs it headless and streams its answer into a shared
 //! transcript that tomboy draws; agents without a headless mode go to a terminal via [`ask`].
 //!
 //! Claude streams `--output-format stream-json` events (text deltas, tool calls, a final
@@ -26,8 +26,9 @@ use crate::sys;
 /// What the agent knows about tomboy: the config file and every option in it.
 pub const SKILL: &str = include_str!("skill.md");
 
-/// The agent CLI to use.
-pub fn name(platform: &Platform) -> String {
+/// The agent CLI to use: `forced` (the config's `[agent] name`) wins over the system's choice.
+pub fn name(platform: &Platform, forced: Option<&str>) -> String {
+    if let Some(agent) = forced.map(str::trim).filter(|a| !a.is_empty()) { return agent.to_string(); }
     if let Platform::Omarchy { root } = platform {
         let out = Command::new("omarchy-default-agent").env("PATH", omarchy_path(root))
             .stdin(Stdio::null()).stderr(Stdio::null()).output();
@@ -39,17 +40,19 @@ pub fn name(platform: &Platform) -> String {
     std::env::var("TOMBOY_AGENT").ok().filter(|a| !a.trim().is_empty()).unwrap_or_else(|| "claude".into())
 }
 
-/// Open the agent interactively in a terminal with `prompt`.
-pub fn ask(prompt: &str, platform: &Platform) -> io::Result<()> {
+/// Open the agent interactively in a terminal with `prompt`. A `forced` agent opens itself;
+/// otherwise Omarchy launches its default.
+pub fn ask(prompt: &str, platform: &Platform, forced: Option<&str>) -> io::Result<()> {
     let prompt = prompt.trim();
     match platform {
+        _ if forced.is_some_and(|a| !a.trim().is_empty()) => sys::run_in_terminal(&[&name(platform, forced), prompt]),
         Platform::Omarchy { root } => {
             let mut cmd = Command::new("omarchy-agent-prompt");
             cmd.arg(prompt).env("PATH", omarchy_path(root));
             if let Some(home) = sys::home_dir() { cmd.current_dir(home); }
             sys::spawn_detached(&mut cmd)
         }
-        Platform::Linux | Platform::MacOS => sys::run_in_terminal(&[&name(platform), prompt]),
+        Platform::Linux | Platform::MacOS => sys::run_in_terminal(&[&name(platform, None), prompt]),
     }
 }
 
@@ -338,6 +341,15 @@ mod tests {
         let mut t = transcript();
         apply_claude_event(&mut t, r#"{"type":"result","is_error":true,"result":"Credit balance too low"}"#);
         assert_eq!(t.status, Status::Failed("Credit balance too low".into()));
+    }
+
+    #[test]
+    fn configured_agent_wins() {
+        let omarchy = Platform::Omarchy { root: "/nonexistent".into() };
+        assert_eq!(name(&omarchy, Some(" codex ")), "codex");
+        assert_eq!(name(&Platform::Linux, Some("opencode")), "opencode");
+        // Blank means unset: fall back to the system's choice.
+        assert_ne!(name(&Platform::Linux, Some("  ")), "  ");
     }
 
     #[test]

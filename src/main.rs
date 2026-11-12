@@ -333,9 +333,10 @@ fn ask_agent(s: &mut Tomboy, prompt: &str) -> std::io::Result<After> {
     let run = match &s.chat {
         Some(run) => run.clone(),
         None => {
-            let name = agent::name(&s.platform);
+            let forced = s.config.agent.name.as_deref();
+            let name = agent::name(&s.platform, forced);
             if !agent::supports_headless(&name) {
-                return agent::ask(prompt, &s.platform).map(|()| After::Quit);
+                return agent::ask(prompt, &s.platform, forced).map(|()| After::Quit);
             }
             agent::Run::new(name, s.config.agent_dir())
         }

@@ -35,8 +35,9 @@ All OS commands live in `src/sys.rs` and `src/apps/{linux,macos}.rs` behind `#[c
   conditions run in the background. Enter on a submenu browses it inside tomboy (Esc goes back);
   submenus the shell fills at runtime open via `omarchy-menu summon <id>`.
   `TOMBOY_PLATFORM=generic` turns this off.
-- **Agent, inside tomboy**: "Ask agent" runs the coding agent headless — Omarchy's default
-  (`omarchy-default-agent`), else `$TOMBOY_AGENT` (default `claude`) — in `~/Work` (or the
+- **Agent, inside tomboy**: "Ask agent" runs the coding agent headless — the
+  [configured](#configuration) `agent.name`, else Omarchy's default (`omarchy-default-agent`),
+  else `$TOMBOY_AGENT` (default `claude`) — in `~/Work` (or the
   [configured](#configuration) directory), and streams
   its answer into the window as Markdown, with tool calls, time and cost. The field then takes
   follow-ups in the same session (claude `--resume`). Enter on an empty field copies the
@@ -57,6 +58,8 @@ tomboy reads it when it opens, so a change applies on the next launch.
 
 ```toml
 [agent]
+# The agent CLI to use. Default: Omarchy's default agent, else $TOMBOY_AGENT, else claude.
+name = "codex"
 # Where "Ask agent" runs the coding agent. Default: ~/Work, or ~ when that doesn't exist.
 working_directory = "~/sites"
 
@@ -67,6 +70,7 @@ font_size = 15
 
 | Setting | Default | What it does |
 | --- | --- | --- |
+| `agent.name` | Omarchy's default, else `$TOMBOY_AGENT`, else `claude` | The coding agent CLI for "Ask agent", overriding the system's choice (Omarchy's default agent is left as it is). `claude`, `opencode`, `codex` and `crush` answer inside tomboy; any other CLI opens in a terminal. |
 | `agent.working_directory` | `~/Work`, else `~` | The agent's working directory. `~` is home; relative paths start at home. A missing directory falls back to the default. |
 | `ui.font_size` | `13` | Text size in points (9–24). The search field, titles, labels and agent answers scale with it and rows grow to fit; icons and the window size stay. |
 
@@ -82,6 +86,8 @@ in the launcher:
 > change the working directory to ~/sites
 
 > make the font bigger
+
+> switch the agent to codex
 
 and the agent writes `config.toml` for you and tells you it applies on the next launch. Claude
 gets the skill as an appended system prompt (`--append-system-prompt`, with `--add-dir
