@@ -934,7 +934,7 @@ fn results_body(s: &Tomboy, t: &tok::Theme, accent: Color) -> (El, String, (&'st
     let left = s.status.clone().unwrap_or_else(|| match (&s.submenu, s.quicklink) {
         (_, Some(l)) => format!("tomboy · quicklink {} · esc to go back", s.links[l].keyword),
         (Some(_), _) => format!("tomboy · {} · esc to go back", s.platform.name()),
-        (None, None) => format!("tomboy · {}", s.platform.name()),
+        (None, None) => format!("tomboy {} · {}", env!("CARGO_PKG_VERSION"), s.platform.name()),
     });
     (body, left, (action, "↵"))
 }
