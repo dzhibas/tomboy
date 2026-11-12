@@ -58,6 +58,43 @@ working_directory = "~/sites"
 font_size = 15
 ```
 
+## Search ranking (usage history)
+
+tomboy ranks what the user launches often and recently higher, and learns which item they
+pick for a query (`news` → hackernews). The history is a separate file, not the config:
+
+- **File**: `~/.local/state/tomboy/frecency.json` (`$XDG_STATE_HOME/tomboy/frecency.json` when
+  that is set). It may not exist yet: then there is nothing to forget.
+- **Format**: a JSON object keyed by item, each with recent launch times and the queries
+  typed to launch it:
+
+  ```json
+  {
+    "app:hackernews.desktop": { "visits": [1794500000, 1794600000], "queries": { "news": 2, "hn": 1 } },
+    "menu:system.lock": { "visits": [1794600000], "queries": { "lock": 1 } }
+  }
+  ```
+
+  Keys are `app:<desktop file id>` for applications and `menu:<omarchy menu id>` for Omarchy
+  commands. A desktop file id isn't always the app's name (Files is
+  `org.gnome.Nautilus.desktop`): match the user's words against the keys, and if none fits,
+  look up `Name=` in the `.desktop` files under `~/.local/share/applications` and
+  `/usr/share/applications`.
+
+What to do:
+
+- "forget hackernews", "reset hackernews's usage", "stop ranking X first", "deprioritize X":
+  remove that one item's key and keep every other entry. It goes back to plain name-match
+  ranking. If several keys could match, say which you removed, or ask when it's unclear.
+- "stop showing hackernews for news", "news shouldn't pick hackernews": remove only that query
+  (and queries starting with it) from the item's `queries`. Keep its visits.
+- "reset usage counts", "reset search ranking", "forget everything": delete the file.
+- "what do I use most?": read the file and list the items with the most recent visits.
+
+Edit the JSON carefully, keeping it valid. A broken file is ignored, and the whole history is
+then lost on the next launch. Changes take effect the next time tomboy opens. Reply in one
+line: what was forgotten.
+
 ## How to make a change
 
 1. Read `~/.config/tomboy/config.toml` if it exists.

@@ -170,14 +170,9 @@ pub fn preview_text(text: &str) -> String {
     truncate(text, MAX)
 }
 
-fn state_dir() -> Option<PathBuf> {
-    std::env::var_os("XDG_STATE_HOME").filter(|d| !d.is_empty()).map(PathBuf::from)
-        .or_else(|| sys::home_dir().map(|h| h.join(".local/state")))
-}
-
 /// Omarchy's history file on Omarchy, tomboy's own elsewhere.
 pub fn history_path(platform: &Platform) -> Option<PathBuf> {
-    let dir = state_dir()?;
+    let dir = sys::state_dir()?;
     Some(match platform {
         Platform::Omarchy { .. } => dir.join("omarchy/clipboard-history.json"),
         Platform::Linux | Platform::MacOS => own_history_path(&dir),
@@ -279,7 +274,7 @@ pub fn capture(mime: &str) -> io::Result<()> {
 
 fn record(bytes: &[u8], mime: &str) -> io::Result<()> {
     if bytes.is_empty() { return Ok(()); }
-    let state = state_dir().ok_or_else(|| io::Error::other("no $HOME"))?;
+    let state = sys::state_dir().ok_or_else(|| io::Error::other("no $HOME"))?;
     let path = own_history_path(&state);
     let dir = path.parent().expect("history has a parent");
     std::fs::create_dir_all(dir)?;

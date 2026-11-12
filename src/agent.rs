@@ -67,14 +67,14 @@ pub fn supports_headless(agent: &str) -> bool {
 }
 
 /// The headless command for `agent`. Like Omarchy's own launcher, agents run unattended.
-/// Claude may also edit `config_dir` (tomboy's config), outside its working directory.
-fn headless_argv(agent: &str, prompt: &str, resume: Option<&str>, config_dir: Option<&std::path::Path>) -> Option<Vec<String>> {
+/// Claude may also edit `extra_dirs` (tomboy's config and state), outside its working directory.
+fn headless_argv(agent: &str, prompt: &str, resume: Option<&str>, extra_dirs: &[PathBuf]) -> Option<Vec<String>> {
     let s = |v: &[&str]| v.iter().map(|a| a.to_string()).collect::<Vec<_>>();
     let mut argv = match agent {
         "claude" => {
             let mut a = s(&["claude", "-p", "--output-format", "stream-json", "--include-partial-messages",
                 "--verbose", "--permission-mode", "auto", "--append-system-prompt", SKILL]);
-            if let Some(dir) = config_dir { a.extend(["--add-dir".into(), dir.display().to_string()]); }
+            for dir in extra_dirs { a.extend(["--add-dir".into(), dir.display().to_string()]); }
             if let Some(id) = resume { a.extend(s(&["--resume", id])); }
             a.push("--".into());
             a.push(prompt.to_string());
@@ -179,10 +179,12 @@ impl Run {
             let t = self.lock();
             (t.agent.clone(), t.session.clone(), t.dir.clone())
         };
-        // Make sure the config directory exists so the agent may write config.toml into it.
-        let config_dir = config::path().and_then(|p| p.parent().map(PathBuf::from))
-            .filter(|d| std::fs::create_dir_all(d).is_ok());
-        let argv = headless_argv(&agent, prompt, session.as_deref(), config_dir.as_deref())
+        // tomboy's config and state directories (config.toml, frecency.json), created so the
+        // agent may write into them.
+        let extra_dirs: Vec<PathBuf> = [config::path().and_then(|p| p.parent().map(PathBuf::from)),
+                                        sys::state_dir().map(|d| d.join("tomboy"))]
+            .into_iter().flatten().filter(|d| std::fs::create_dir_all(d).is_ok()).collect();
+        let argv = headless_argv(&agent, prompt, session.as_deref(), &extra_dirs)
             .ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, format!("{agent} has no headless mode")))?;
         let mut cmd = Command::new(&argv[0]);
         cmd.args(&argv[1..]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -354,12 +356,12 @@ mod tests {
 
     #[test]
     fn headless_commands() {
-        let claude = headless_argv("claude", "hi", Some("s1"), Some(std::path::Path::new("/c/tomboy"))).unwrap();
-        assert_eq!(claude[8..], ["--append-system-prompt", SKILL, "--add-dir", "/c/tomboy", "--resume", "s1", "--", "hi"]);
-        let codex = headless_argv("codex", "-x", None, None).unwrap();
+        let claude = headless_argv("claude", "hi", Some("s1"), &["/c/tomboy".into(), "/s/tomboy".into()]).unwrap();
+        assert_eq!(claude[8..], ["--append-system-prompt", SKILL, "--add-dir", "/c/tomboy", "--add-dir", "/s/tomboy", "--resume", "s1", "--", "hi"]);
+        let codex = headless_argv("codex", "-x", None, &[]).unwrap();
         assert_eq!(codex[..3], ["codex", "exec", "--"]);
         assert!(codex[3].starts_with(SKILL) && codex[3].ends_with("\n\n-x"));
-        assert!(headless_argv("hermes", "hi", None, None).is_none());
+        assert!(headless_argv("hermes", "hi", None, &[]).is_none());
         assert!(supports_headless("opencode") && !supports_headless("pi"));
     }
 

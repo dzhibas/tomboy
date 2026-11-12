@@ -20,6 +20,7 @@ mod calc;
 mod clipboard;
 mod config;
 mod dictation;
+mod frecency;
 // Omarchy is Linux-only; on macOS the module compiles but `Platform::Omarchy` never occurs.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod omarchy;
@@ -126,6 +127,8 @@ struct Tomboy {
     clips_direct: bool,
     /// `~/.config/tomboy/config.toml`, read at launch.
     config: config::Config,
+    /// What was launched, when and under which query, to rank usual picks first.
+    frecency: frecency::Store,
     /// The picked clip's picture (kept here: the cache drops an image nobody holds).
     clip_image: Option<(std::path::PathBuf, Image)>,
 }
@@ -192,7 +195,7 @@ fn init() -> Tomboy {
         platform, menu, conds: Conditions::default(), status,
         last_text: String::new(), dictated: Arc::default(), waker: None, chat: None, submenu: None,
         seed: answers::devtools::session_seed(), wake: Arc::new(|| {}),
-        clips: None, clips_direct: false, clip_image: None, config,
+        clips: None, clips_direct: false, clip_image: None, config, frecency: frecency::Store::load(),
     };
     if rune::extra_args().iter().any(|a| a == "clipboard") {
         enter_clipboard(&mut s);
@@ -259,7 +262,7 @@ fn results(s: &Tomboy) -> Vec<Item> {
     if let Some(id) = &s.submenu {
         // Inside a submenu: its rows, or a search of everything under it.
         let rows = if q.is_empty() { omarchy::children_of(&s.menu, &s.conds, id) }
-            else { omarchy::search(&s.menu, &s.conds, q, Some(id), MAX_APPS) };
+            else { omarchy::search(&s.menu, &s.conds, q, Some(id), MAX_APPS, menu_boost(s, q)) };
         return rows.into_iter().map(Item::Menu).collect();
     }
     let mut items = Vec::new();
@@ -274,8 +277,10 @@ fn results(s: &Tomboy) -> Vec<Item> {
         items.push(Item::Clipboard);
     }
     let app_limit = if q.is_empty() { MAX_APPS } else { MAX_APP_HITS };
-    items.extend(apps::search(&s.apps, q, app_limit).into_iter().map(Item::App));
-    items.extend(omarchy::search(&s.menu, &s.conds, q, None, MAX_MENU_HITS).into_iter().map(Item::Menu));
+    let now = frecency::now();
+    let app_boost = |i: usize| s.frecency.boost(&frecency::app_key(&s.apps[i].id), q, now);
+    items.extend(apps::search(&s.apps, q, app_limit, app_boost).into_iter().map(Item::App));
+    items.extend(omarchy::search(&s.menu, &s.conds, q, None, MAX_MENU_HITS, menu_boost(s, q)).into_iter().map(Item::Menu));
     if !q.is_empty() && !matches!(items.first(), Some(Item::Calc { .. } | Item::Answer(_) | Item::Url(_))) {
         items.push(Item::Agent(q.to_string()));
         items.push(Item::WebSearch(q.to_string()));
@@ -283,7 +288,24 @@ fn results(s: &Tomboy) -> Vec<Item> {
     items
 }
 
+/// Frecency points for Omarchy menu row `i` under query `q`.
+fn menu_boost<'a>(s: &'a Tomboy, q: &'a str) -> impl Fn(usize) -> u32 + 'a {
+    let now = frecency::now();
+    move |i| s.frecency.boost(&frecency::menu_key(&s.menu[i].id), q, now)
+}
+
+/// The frecency key of an item that launches something (an app, a menu command); `None`
+/// for answers, fallbacks and rows that open a submenu inside tomboy.
+fn frecency_key(s: &Tomboy, item: &Item) -> Option<String> {
+    match item {
+        Item::App(i) => Some(frecency::app_key(&s.apps[*i].id)),
+        Item::Menu(i) if !omarchy::has_children(&s.menu, &s.menu[*i].id) => Some(frecency::menu_key(&s.menu[*i].id)),
+        _ => None,
+    }
+}
+
 fn run_item(s: &mut Tomboy, item: &Item, tx: &mut Tx) {
+    let key = frecency_key(s, item);
     let outcome = match item {
         Item::Calc { value, .. } => copy_text(value, tx).map(|()| {
             s.status = Some(format!("Copied {value}"));
@@ -318,6 +340,10 @@ fn run_item(s: &mut Tomboy, item: &Item, tx: &mut Tx) {
         Item::Clipboard => { enter_clipboard(s); Ok(After::Stay) }
         Item::Clip(i) => copy_clip(s, *i, tx),
     };
+    if let (Some(key), Ok(_)) = (&key, &outcome) {
+        let query = s.query.text.clone();
+        s.frecency.record(key, &query, frecency::now());
+    }
     match outcome {
         Ok(After::Quit) => quit(s, tx),
         Ok(After::Stay) => {}

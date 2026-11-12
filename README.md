@@ -12,6 +12,14 @@ A personal Raycast-style launcher for Linux (Hyprland/Omarchy) and macOS, built 
 All OS commands live in `src/sys.rs` and `src/apps/{linux,macos}.rs` behind `#[cfg(target_os)]`.
 
 - **Apps**: type to fuzzy-search installed `.desktop` applications; Enter launches (via `uwsm app --` when available).
+- **Ranking learns from you (frecency)**: every app or Omarchy command you launch is remembered
+  with when you launched it and what you typed. Things you use often and recently move up, and
+  a query you've used before favours what you picked last time: launch hackernews after typing
+  `news` and `news` (or `ne`) ranks it above euronews, so Enter opens it. With an empty field,
+  your usual apps come first. It only reorders matches, never adds one. Stored in
+  `~/.local/state/tomboy/frecency.json`; delete it to start over, or ask the agent: "forget
+  hackernews" drops one item, "news shouldn't pick hackernews" drops one learned query, "reset
+  usage counts" clears it all.
 - **Calculator**: `2+2`, `(2+2)*10/3`, `sqrt(16)`, `2^10`, `sin(pi/2)` — Enter copies the answer (`wl-copy`).
   Percentages work like a phone calculator: `15% of 200` = 30, `15% off 200` = 170,
   `200 + 15%` = 230, `200 - 15%` = 170; `10 % 3` is still modulo.
@@ -177,6 +185,7 @@ For the clipboard history key, see [Bind it to a key in Hyprland](#bind-it-to-a-
 | `src/agent.rs` | Handing a prompt to the coding agent |
 | `src/answers/` | Units, currency, date math, time zones, developer utilities, kill process |
 | `src/clipboard.rs` | Clipboard history: reading, searching, copying back, recording |
+| `src/frecency.rs` | Launch history: frecency and learned queries for ranking |
 | `src/config.rs` | `~/.config/tomboy/config.toml`: loading and defaults |
 | `src/skill.md` | What the agent knows about tomboy's config (sent with every agent run) |
 | `src/sys.rs` | OS commands: open URL, clipboard, detached spawn |

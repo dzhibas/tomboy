@@ -215,13 +215,15 @@ pub fn run(item: &MenuItem, root: &Path) -> std::io::Result<()> {
 
 /// Rank visible rows against `query` (empty matches nothing); indices into `items`, best first.
 /// With `scope`, only rows under that submenu id count.
-pub fn search(items: &[MenuItem], conds: &Conditions, query: &str, scope: Option<&str>, limit: usize) -> Vec<usize> {
+/// `boost(i)` adds to row `i`'s match score (frecency); it reorders matches, never adds one.
+pub fn search(items: &[MenuItem], conds: &Conditions, query: &str, scope: Option<&str>, limit: usize,
+              boost: impl Fn(usize) -> u32) -> Vec<usize> {
     let q = query.trim().to_lowercase();
     if q.is_empty() { return Vec::new(); }
     let prefix = scope.map(|id| format!("{id}."));
     let mut scored: Vec<(u32, usize, usize)> = items.iter().enumerate()
         .filter(|(i, it)| conds.visible(*i) && prefix.as_deref().is_none_or(|p| it.id.starts_with(p)))
-        .filter_map(|(i, it)| score(it, &q).map(|s| (s, it.parents.len(), i)))
+        .filter_map(|(i, it)| score(it, &q).map(|s| (s + boost(i), it.parents.len(), i)))
         .collect();
     // Higher score first; shallower rows (Lock over Appearance › … › Lock) win ties.
     scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
@@ -311,12 +313,12 @@ mod tests {
     fn search_ranks_labels_then_breadcrumbs() {
         let it = items();
         let all_visible = Conditions(Arc::new(it.iter().map(|_| AtomicU8::new(SHOWN)).collect()));
-        let ids = |q| search(&it, &all_visible, q, None, 10).into_iter().map(|i| it[i].id.clone()).collect::<Vec<_>>();
+        let ids = |q| search(&it, &all_visible, q, None, 10, |_| 0).into_iter().map(|i| it[i].id.clone()).collect::<Vec<_>>();
         assert_eq!(ids("lock"), ["system.lock"]);
         assert_eq!(ids("bar hide")[0], "appearance.top-bar.hide");
         assert_eq!(ids("hide")[0], "appearance.top-bar.hide");
         assert!(ids("").is_empty());
-        let scoped = search(&it, &all_visible, "lock", Some("appearance"), 10);
+        let scoped = search(&it, &all_visible, "lock", Some("appearance"), 10, |_| 0);
         assert!(scoped.is_empty(), "Lock is under System, not Appearance");
     }
 

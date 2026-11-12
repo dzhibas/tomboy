@@ -116,3 +116,9 @@ fn on_path(program: &str) -> bool {
 pub fn home_dir() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME").filter(|h| !h.is_empty()).map(Into::into)
 }
+
+/// `$XDG_STATE_HOME`, else `~/.local/state`: where tomboy keeps what it learns and records.
+pub fn state_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("XDG_STATE_HOME").filter(|d| !d.is_empty()).map(Into::into)
+        .or_else(|| home_dir().map(|h| h.join(".local/state")))
+}
