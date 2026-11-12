@@ -6,6 +6,10 @@
 //! [agent]
 //! # Where "Ask agent" runs the coding agent. Default: ~/Work, or ~ when that doesn't exist.
 //! working_directory = "~/sites"
+//!
+//! [ui]
+//! # Text size in points for list rows; titles and labels scale with it. Default 13.
+//! font_size = 15
 //! ```
 //!
 //! Every option is documented for the agent in `src/skill.md`; keep the two in step.
@@ -20,6 +24,19 @@ use crate::sys;
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub agent: AgentConfig,
+    pub ui: UiConfig,
+}
+
+/// The default `ui.font_size`: Rune's body text size.
+pub const DEFAULT_FONT_SIZE: f32 = 13.0;
+/// The range `ui.font_size` is clamped to, so the launcher stays usable.
+pub const FONT_SIZE_RANGE: std::ops::RangeInclusive<f32> = 9.0..=24.0;
+
+#[derive(Debug, Default, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct UiConfig {
+    /// Body text size in points; every other text size scales with it.
+    pub font_size: Option<f32>,
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
@@ -40,8 +57,18 @@ impl Config {
         Some(if work.is_dir() { work } else { home })
     }
 
-    /// A warning for the footer when the configured directory is missing.
+    /// How much bigger than default the text is: `ui.font_size / 13`, within [`FONT_SIZE_RANGE`].
+    pub fn font_scale(&self) -> f32 {
+        let size = self.ui.font_size.filter(|s| s.is_finite()).unwrap_or(DEFAULT_FONT_SIZE);
+        size.clamp(*FONT_SIZE_RANGE.start(), *FONT_SIZE_RANGE.end()) / DEFAULT_FONT_SIZE
+    }
+
+    /// A warning for the footer when a setting can't be used as written.
     pub fn warning(&self) -> Option<String> {
+        if let Some(size) = self.ui.font_size.filter(|s| !FONT_SIZE_RANGE.contains(s)) {
+            let (lo, hi) = (FONT_SIZE_RANGE.start(), FONT_SIZE_RANGE.end());
+            return Some(format!("config: ui.font_size {size} is outside {lo}–{hi}; using {}", self.font_scale() * DEFAULT_FONT_SIZE));
+        }
         let home = sys::home_dir()?;
         let dir = self.agent.working_directory.as_deref()?;
         (!expand(dir, &home).is_dir()).then(|| format!("config: agent.working_directory {dir} doesn't exist; using the default"))
@@ -98,6 +125,19 @@ mod tests {
         assert_eq!(c, Config::default());
         assert!(err.unwrap().contains("unknown field"));
         assert!(parse("[agent").1.is_some());
+    }
+
+    #[test]
+    fn font_size() {
+        assert_eq!(parse("").0.font_scale(), 1.0);
+        let (c, err) = parse("[ui]\nfont_size = 26\n");
+        assert_eq!(err, None);
+        assert_eq!(c.ui.font_size, Some(26.0));
+        assert_eq!(c.font_scale(), 2.0 * 24.0 / 26.0);
+        assert!(c.warning().unwrap().contains("outside"));
+        let (c, _) = parse("[ui]\nfont_size = 14.5\n");
+        assert_eq!(c.font_scale(), 14.5 / 13.0);
+        assert_eq!(c.warning(), None);
     }
 
     #[test]

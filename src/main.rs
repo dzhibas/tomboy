@@ -32,7 +32,7 @@ use rune::{
     App, AppSpec, Color, Cx, El, Family, Image, ImageCache, Key, KeyEvent, ScrollSpec, SurfaceFit, TextEdit, Tx,
     WindowOptions, Waker, col, el, row, spacer, text, text_input,
 };
-use rune_kit::{Markdown, MarkdownStyle};
+use rune_kit::Markdown;
 
 use std::sync::{Arc, Mutex};
 
@@ -50,6 +50,44 @@ const MAX_APPS: usize = 30;
 const MAX_APP_HITS: usize = 8;
 const MAX_MENU_HITS: usize = 8;
 const ICON: f32 = 28.0;
+
+/// Text styles scaled by `[ui] font_size` (read once at launch), and sizes that follow text.
+/// Icons keep their size.
+mod ty {
+    use rune::TextStyle;
+    use rune::tok::type_;
+    use std::sync::OnceLock;
+
+    static SCALE: OnceLock<f32> = OnceLock::new();
+
+    pub fn set_scale(k: f32) { let _ = SCALE.set(k); }
+    pub fn scale() -> f32 { SCALE.get().copied().unwrap_or(1.0) }
+
+    /// A height or line height that holds text, scaled with it.
+    pub fn px(v: f32) -> f32 { (v * scale()).round() }
+    fn sized(t: TextStyle) -> TextStyle {
+        let k = scale();
+        TextStyle { size: t.size * k, line_height: t.line_height * k, ..t }
+    }
+    /// The search field, 28 pt lines.
+    pub fn title() -> TextStyle { sized(type_::TITLE.lh(28.0)) }
+    pub fn body() -> TextStyle { sized(type_::BODY) }
+    pub fn label() -> TextStyle { sized(type_::LABEL) }
+
+    /// Rune's neutral Markdown look with its text sizes scaled (sizes as `MarkdownStyle::from_kit`).
+    pub fn markdown(dark: bool) -> rune_kit::MarkdownStyle {
+        let kit = rune_kit::Kit::neutral(dark);
+        let body = TextStyle { line_height: 22.4, ..kit.ty.body };
+        let heading = |size, lh| sized(TextStyle { size, weight: 600.0, line_height: lh, ..body });
+        rune_kit::MarkdownStyle::from_kit(&kit)
+            .body_font(sized(body))
+            .heading_font(1, heading(17.0, 24.0))
+            .heading_font(2, heading(15.0, 24.0))
+            .heading_font(3, heading(13.0, 20.0))
+            .heading_font(4, heading(13.0, 20.0))
+            .code_block_font(sized(TextStyle { size: 13.0, line_height: 20.0, ..kit.ty.mono }))
+    }
+}
 /// Omarchy's menu icons are Nerd Font glyphs.
 const NERD_FONT: Family = Family::Named("JetBrainsMono Nerd Font");
 /// Nerd Font robot (nf-md-robot), drawn with `NERD_FONT`.
@@ -139,6 +177,7 @@ enum After {
 
 fn init() -> Tomboy {
     let (config, config_error) = config::load();
+    ty::set_scale(config.font_scale());
     let status = config_error.or_else(|| config.warning());
     let mut query = TextEdit::new("");
     query.focused = true;
@@ -467,22 +506,22 @@ fn view(s: &Tomboy, cx: &mut Cx<Tomboy>) -> El {
         else if s.clips.is_some() { "Search clipboard…".to_string() }
         else if let Some(c) = &crumb { format!("Search {}…", c.rsplit(" › ").next().unwrap_or(c)) }
         else { "Search apps, calculate, or paste a URL…".to_string() };
-    let field = text_input(&s.query, type_::TITLE.lh(28.0)).key("query").single_line().grow(1.0)
+    let field = text_input(&s.query, ty::title()).key("query").single_line().grow(1.0)
         .color(t.text).placeholder(placeholder, t.text_secondary)
         .on_edit(|s: &mut Tomboy| &mut s.query)
         .on_input_key(on_input_key)
         .on_input_change(on_change)
         .on_submit(submit);
     let glyph = if s.chat.is_some() {
-        text(AGENT_GLYPH).font(type_::TITLE.lh(28.0).family(NERD_FONT)).color(AGENT_COLOR)
+        text(AGENT_GLYPH).font(ty::title().family(NERD_FONT)).color(AGENT_COLOR)
     } else {
-        text("⌕").font(type_::TITLE.lh(28.0)).color(t.text_secondary)
+        text("⌕").font(ty::title()).color(t.text_secondary)
     };
-    let mut header = row().h(60.0).px(20.0).gap(14.0).center_y().child(glyph);
+    let mut header = row().h(ty::px(60.0)).px(20.0).gap(14.0).center_y().child(glyph);
     if let Some(c) = crumb {
         // The open submenu, as a chip; clicking it goes back up.
-        header = header.child(row().key("crumb").h(28.0).px(10.0).radius(7.0).center_y().fill(t.control_off)
-            .child(text(c).font(type_::LABEL).color(t.text))
+        header = header.child(row().key("crumb").h(ty::px(28.0)).px(10.0).radius(7.0).center_y().fill(t.control_off)
+            .child(text(c).font(ty::label()).color(t.text))
             .on_press(|s: &mut Tomboy| if s.clips.is_some() { if !s.clips_direct { leave_clipboard(s) } }
                 else { leave_submenu(s) }));
     }
@@ -493,9 +532,9 @@ fn view(s: &Tomboy, cx: &mut Cx<Tomboy>) -> El {
         None if s.clips.is_some() => clipboard_body(s, &t, accent),
         None => results_body(s, &t, accent),
     };
-    let footer = row().h(40.0).px(16.0).gap(10.0).center_y().fill(t.bg)
-        .child(text(left).font(type_::LABEL).color(t.text_secondary).truncate().grow(1.0).min_w(0.0))
-        .child(text(action.0).font(type_::LABEL).color(t.text))
+    let footer = row().h(ty::px(40.0)).px(16.0).gap(10.0).center_y().fill(t.bg)
+        .child(text(left).font(ty::label()).color(t.text_secondary).truncate().grow(1.0).min_w(0.0))
+        .child(text(action.0).font(ty::label()).color(t.text))
         .child(keycap(action.1, &t));
 
     col().w_full().h_full().fill(t.card)
@@ -524,14 +563,14 @@ fn results_body(s: &Tomboy, t: &tok::Theme, accent: Color) -> (El, String, (&'st
         };
         if section != Some(name) {
             section = Some(name);
-            list = list.child(row().h(28.0).px(12.0).center_y()
-                .child(text(name).font(type_::LABEL).color(t.text_secondary)));
+            list = list.child(row().h(ty::px(28.0)).px(12.0).center_y()
+                .child(text(name).font(ty::label()).color(t.text_secondary)));
         }
         list = list.child(item_row(s, item, i, i == s.picked, t, accent));
     }
     if items.is_empty() {
         list = list.child(col().h(120.0).w_full().center()
-            .child(text("No results").font(type_::BODY).color(t.text_secondary)));
+            .child(text("No results").font(ty::body()).color(t.text_secondary)));
     }
     let body = col().w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(list);
     let action = items.get(s.picked).map(|it| it.action(s)).unwrap_or("");
@@ -555,7 +594,7 @@ fn clipboard_body(s: &Tomboy, t: &tok::Theme, accent: Color) -> (El, String, (&'
     if items.is_empty() {
         let empty = if clips.is_empty() { "No clipboard history yet" } else { "No matching clips" };
         list = list.child(col().h(120.0).w_full().center()
-            .child(text(empty).font(type_::BODY).color(t.text_secondary)));
+            .child(text(empty).font(ty::body()).color(t.text_secondary)));
     }
     let picked = match items.get(s.picked) { Some(Item::Clip(c)) => clips.get(*c), _ => None };
     let preview = match picked {
@@ -585,11 +624,11 @@ fn clip_row(clip: &Clip, i: usize, on: bool, t: &tok::Theme, accent: Color) -> E
         Clip::Text(_) => ("\u{f09a8}", Color { r: 0.45, g: 0.45, b: 0.5, a: 1.0 }), // nf-md-text
     };
     let fg = if on { Color::WHITE } else { t.text };
-    row().key(format!("item-{i}")).h(40.0).px(10.0).gap(10.0).radius(8.0).center_y()
+    row().key(format!("item-{i}")).h(ty::px(40.0)).px(10.0).gap(10.0).radius(8.0).center_y()
         .fill(if on { accent.alpha(0.85) } else { Color::TRANSPARENT })
         .child(row().size(24.0, 24.0).radius(6.0).center().fill(c)
             .child(text(g).font(type_::LABEL.lh(16.0).family(NERD_FONT)).color(Color::WHITE)))
-        .child(text(clip.title()).font(type_::BODY).color(fg).truncate().grow(1.0).min_w(0.0))
+        .child(text(clip.title()).font(ty::body()).color(fg).truncate().grow(1.0).min_w(0.0))
         .on_hover(move |s: &mut Tomboy| { s.picked = i; sync_clip_image(s); })
         .on_press_tx(move |s: &mut Tomboy, tx: &mut Tx| {
             s.picked = i;
@@ -603,13 +642,13 @@ fn clip_preview(s: &Tomboy, clip: &Clip, t: &tok::Theme) -> El {
     let content = match (clip.image_path(), &s.clip_image) {
         // The pixels fill in once the worker decodes them; Fit letterboxes the picture.
         (Some(path), Some((p, img))) if *p == path => match img.error() {
-            Some(e) => text(format!("Can't show image: {e}")).font(type_::LABEL).color(t.text_secondary).wrap(),
+            Some(e) => text(format!("Can't show image: {e}")).font(ty::label()).color(t.text_secondary).wrap(),
             None => el().w_full().grow(1.0).min_h(0.0).pixels_fit(img.pixels(), SurfaceFit::Fit),
         },
-        (Some(_), _) => text("Loading…").font(type_::LABEL).color(t.text_secondary),
+        (Some(_), _) => text("Loading…").font(ty::label()).color(t.text_secondary),
         (None, _) => match clip {
             Clip::Text(body) => col().w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false })
-                .child(text(clipboard::preview_text(body)).font(type_::LABEL.family(Family::Mono))
+                .child(text(clipboard::preview_text(body)).font(ty::label().family(Family::Mono))
                     .color(t.text).wrap().selectable(true)),
             Clip::Image { .. } => col(),
         },
@@ -620,32 +659,32 @@ fn clip_preview(s: &Tomboy, clip: &Clip, t: &tok::Theme) -> El {
         .child(text(match s.clip_image.as_ref().and_then(|(_, img)| img.size()) {
             Some([w, h]) if clip.image_path().is_some() => format!("{} · {w}×{h}", clip.kind()),
             _ => clip.kind(),
-        }).font(type_::LABEL).color(t.text_secondary).truncate())
+        }).font(ty::label()).color(t.text_secondary).truncate())
 }
 
 /// The agent conversation, streaming: prompts, Markdown answers, tool calls.
 fn chat_body(s: &Tomboy, run: &agent::Run, dark: bool, t: &tok::Theme) -> (El, String, (&'static str, &'static str)) {
     let tr = run.lock();
-    let md = MarkdownStyle::neutral(dark);
+    let md = ty::markdown(dark);
     let running = tr.is_running();
     let mut log = col().key("transcript").w_full().px(20.0).py(14.0).gap(10.0);
     for (i, block) in tr.blocks.iter().enumerate() {
         let last = i + 1 == tr.blocks.len();
         log = log.child(match block {
             Block::Prompt(p) => row().w_full().gap(10.0).padding(10.0).radius(9.0).fill(t.control_off)
-                .child(text("›").font(type_::BODY).color(AGENT_COLOR))
-                .child(text(p.clone()).font(type_::BODY).color(t.text).wrap().grow(1.0).min_w(0.0)),
+                .child(text("›").font(ty::body()).color(AGENT_COLOR))
+                .child(text(p.clone()).font(ty::body()).color(t.text).wrap().grow(1.0).min_w(0.0)),
             Block::Text(md_src) => col().w_full()
                 .child(Markdown::new(md_src.trim()).streaming(running && last).render(&md)),
             Block::Tool(summary) => row().w_full().gap(8.0).center_y()
-                .child(text("⚙").font(type_::LABEL).color(t.text_secondary))
-                .child(text(summary.clone()).font(type_::LABEL.family(Family::Mono)).color(t.text_secondary).truncate()
+                .child(text("⚙").font(ty::label()).color(t.text_secondary))
+                .child(text(summary.clone()).font(ty::label().family(Family::Mono)).color(t.text_secondary).truncate()
                     .grow(1.0).min_w(0.0)),
-            Block::Error(e) => text(e.clone()).font(type_::BODY).color(Color { r: 0.95, g: 0.35, b: 0.35, a: 1.0 }).wrap(),
+            Block::Error(e) => text(e.clone()).font(ty::body()).color(Color { r: 0.95, g: 0.35, b: 0.35, a: 1.0 }).wrap(),
         });
     }
     if running && !matches!(tr.blocks.last(), Some(Block::Text(_))) {
-        log = log.child(text("Thinking…").font(type_::LABEL).color(t.text_secondary));
+        log = log.child(text("Thinking…").font(ty::label()).color(t.text_secondary));
     }
     let body = col().w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: true }).child(log);
     let state = match &tr.status {
@@ -662,8 +701,8 @@ fn chat_body(s: &Tomboy, run: &agent::Run, dark: bool, t: &tok::Theme) -> (El, S
 }
 
 fn keycap(label: &str, t: &tok::Theme) -> El {
-    row().h(20.0).min_w(22.0).px(6.0).radius(5.0).center().fill(t.control_off)
-        .child(text(label.to_string()).font(type_::LABEL).color(t.text))
+    row().h(ty::px(20.0)).min_w(ty::px(22.0)).px(6.0).radius(5.0).center().fill(t.control_off)
+        .child(text(label.to_string()).font(ty::label()).color(t.text))
 }
 
 fn item_row(s: &Tomboy, item: &Item, i: usize, on: bool, t: &tok::Theme, accent: Color) -> El {
@@ -718,17 +757,17 @@ fn item_row(s: &Tomboy, item: &Item, i: usize, on: bool, t: &tok::Theme, accent:
     };
     let fg = if on { Color::WHITE } else { t.text };
     let fg2 = if on { Color::WHITE.alpha(0.75) } else { t.text_secondary };
-    let mut r = row().key(format!("item-{i}")).h(46.0).px(12.0).gap(12.0).radius(9.0).center_y()
+    let mut r = row().key(format!("item-{i}")).h(ty::px(46.0)).px(12.0).gap(12.0).radius(9.0).center_y()
         .fill(if on { accent.alpha(0.85) } else { Color::TRANSPARENT })
         .child(icon)
-        .child(text(title).font(type_::BODY).color(fg).truncate());
+        .child(text(title).font(ty::body()).color(fg).truncate());
     if let Some(sub) = subtitle {
-        r = r.child(text(sub).font(type_::LABEL).color(fg2).truncate().grow(1.0).min_w(0.0));
+        r = r.child(text(sub).font(ty::label()).color(fg2).truncate().grow(1.0).min_w(0.0));
     } else {
         r = r.child(spacer());
     }
     let item = item.clone();
-    r.child(text(kind).font(type_::LABEL).color(fg2))
+    r.child(text(kind).font(ty::label()).color(fg2))
         .on_hover(move |s: &mut Tomboy| s.picked = i)
         .on_press_tx(move |s: &mut Tomboy, tx: &mut Tx| { s.picked = i; run_item(s, &item, tx); })
 }

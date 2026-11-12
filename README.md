@@ -59,11 +59,16 @@ tomboy reads it when it opens, so a change applies on the next launch.
 [agent]
 # Where "Ask agent" runs the coding agent. Default: ~/Work, or ~ when that doesn't exist.
 working_directory = "~/sites"
+
+[ui]
+# Text size in points; titles, labels and agent answers scale with it. Default 13.
+font_size = 15
 ```
 
 | Setting | Default | What it does |
 | --- | --- | --- |
 | `agent.working_directory` | `~/Work`, else `~` | The agent's working directory. `~` is home; relative paths start at home. A missing directory falls back to the default. |
+| `ui.font_size` | `13` | Text size in points (9–24). The search field, titles, labels and agent answers scale with it and rows grow to fit; icons and the window size stay. |
 
 A file that doesn't parse, or has an unknown key, is ignored as a whole; the footer says why
 (`config.toml ignored: unknown field …`).
@@ -75,6 +80,8 @@ what the config file is, every option, and how to edit it safely. So you can say
 in the launcher:
 
 > change the working directory to ~/sites
+
+> make the font bigger
 
 and the agent writes `config.toml` for you and tells you it applies on the next launch. Claude
 gets the skill as an appended system prompt (`--append-system-prompt`, with `--add-dir

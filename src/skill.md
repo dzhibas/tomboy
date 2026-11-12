@@ -8,8 +8,8 @@ window as Markdown: keep it short.
 ## Changing tomboy's settings
 
 When the user asks to change how tomboy behaves ("change the working directory to ~/sites",
-"run the agent in my projects folder", "what can I configure in tomboy?"), edit tomboy's config
-file. Do not edit tomboy's source code for this.
+"run the agent in my projects folder", "make the text bigger", "font size 16", "what can I
+configure in tomboy?"), edit tomboy's config file. Do not edit tomboy's source code for this.
 
 - **File**: `~/.config/tomboy/config.toml` (`$XDG_CONFIG_HOME/tomboy/config.toml` when that is set).
   It is optional: create it, and the `~/.config/tomboy/` directory, when missing.
@@ -28,11 +28,25 @@ file. Do not edit tomboy's source code for this.
 | --- | --- | --- | --- |
 | `working_directory` | string (path) | `~/Work`, or `~` if that doesn't exist | The directory "Ask agent" runs the coding agent in. `~` means the home directory; a relative path is taken from home. If the directory doesn't exist tomboy falls back to the default and warns in its footer. |
 
+### `[ui]`
+
+| Key | Type | Default | What it does |
+| --- | --- | --- | --- |
+| `font_size` | number (points) | `13` | Text size of the launcher's rows. Titles, labels, the search field and agent answers scale with it, and rows grow to fit; icons and the window keep their size. Allowed range 9 to 24: tomboy clamps anything outside it and warns in its footer. |
+
+Relative requests change the current value (13 when unset) in steps of 2 points:
+"bigger"/"increase the font" → +2, "much bigger" → +4, "smaller"/"decrease" → -2,
+"reset the font size" → delete the `font_size` line. Never go outside 9–24; if a step would,
+use the limit and say so. Whole numbers are fine; halves (`14.5`) work too.
+
 Example:
 
 ```toml
 [agent]
 working_directory = "~/sites"
+
+[ui]
+font_size = 15
 ```
 
 ## How to make a change
@@ -41,7 +55,7 @@ working_directory = "~/sites"
 2. For a path setting, check the directory exists. If it doesn't, say so and ask whether to
    create it, unless the user already asked you to.
 3. Write the file with the new value, keeping everything else.
-4. Reply in one or two lines: what changed, the new value, and that it applies on the next
-   launch of tomboy.
+4. Reply in one or two lines: what changed, the old and new value, and that it applies on the
+   next launch of tomboy.
 
 To undo a setting, delete its line (or the whole file) to go back to the default.
