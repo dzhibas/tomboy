@@ -2,6 +2,38 @@
 
 A personal Raycast-style launcher for Linux (Hyprland/Omarchy) and macOS, built with [Rune](https://github.com/anomalyco/rune).
 
+## Install on Omarchy
+
+Tested on Omarchy 4.5.
+
+1. **Install Rust.** Open the Omarchy menu (Super+Space) → **Install** → **Development** →
+   **Rust**, and let it finish in the terminal it opens.
+2. **Install tomboy** in a new terminal:
+
+   ```sh
+   cargo install --git https://github.com/dzhibas/tomboy
+   ```
+
+   This builds the latest `main` (a few minutes the first time) into `~/.cargo/bin/tomboy`.
+   Run the same command again later to update.
+3. **Bind the keys.** Add these to the end of `~/.config/hypr/bindings.lua`:
+
+   ```lua
+   -- Super+Space: tomboy launcher (was: Omarchy menu).
+   o.rebind("SUPER + SPACE", "Tomboy launcher", "~/.cargo/bin/tomboy")
+   -- Super+Shift+C: tomboy clipboard history (was: Calendar).
+   o.rebind("SUPER + SHIFT + C", "Tomboy clipboard", "~/.cargo/bin/tomboy clipboard")
+   ```
+
+   Hyprland reloads on save; `hyprctl configerrors` should print nothing. The Omarchy menu is
+   still a keystroke away: every entry in it is searchable inside tomboy (`theme`, `lock`,
+   `install docker`), and its submenus open in tomboy too.
+4. **Try it**: press Super+Space and type `firefox`, `2+2`, `100 km to miles`, `emoji` or
+   `clip`.
+
+Optional: bind the emoji picker too, see [Emoji & symbols](#emoji--symbols), and set things up
+in [Configuration](#configuration) (or just ask the agent: "make the font bigger").
+
 | | Linux | macOS |
 | --- | --- | --- |
 | Apps | XDG `.desktop` entries, launched (via `uwsm app --` if present) | `.app` bundles in `/Applications`, `~/Applications`, `/System/Applications`…, launched with `open` |
@@ -140,14 +172,14 @@ keywords from Omarchy's emoji picker (MIT), generated into `src/emoji/emoji.tsv`
 Bind it in Hyprland:
 
 ```
-bind = SUPER CTRL, E, exec, ~/Work/tomboy/target/release/tomboy emoji
+bind = SUPER CTRL, E, exec, ~/.cargo/bin/tomboy emoji
 ```
 
 On Omarchy SUPER+CTRL+E opens Omarchy's own emoji picker, so replace it in
 `~/.config/hypr/bindings.lua`:
 
 ```lua
-o.rebind("SUPER + CTRL + E", "Tomboy emoji", "/home/me/Work/tomboy/target/release/tomboy emoji")
+o.rebind("SUPER + CTRL + E", "Tomboy emoji", "~/.cargo/bin/tomboy emoji")
 ```
 
 ## Clipboard history
@@ -179,7 +211,7 @@ password managers mark as sensitive. Start it once at login:
 
 ```
 # ~/.config/hypr/hyprland.conf (not needed on Omarchy)
-exec-once = ~/Work/tomboy/target/release/tomboy clipboard-watch
+exec-once = ~/.cargo/bin/tomboy clipboard-watch
 ```
 
 ### Bind it to a key in Hyprland
@@ -187,39 +219,36 @@ exec-once = ~/Work/tomboy/target/release/tomboy clipboard-watch
 Classic config (`~/.config/hypr/hyprland.conf` or a file it sources, such as `bindings.conf`):
 
 ```
-bind = SUPER CTRL, V, exec, ~/Work/tomboy/target/release/tomboy clipboard
+bind = SUPER CTRL, V, exec, ~/.cargo/bin/tomboy clipboard
 ```
 
 Omarchy's Lua config (`~/.config/hypr/bindings.lua`). SUPER+CTRL+V opens Omarchy's own
 clipboard panel by default, so `o.rebind` replaces it (use `o.bind` for a free key):
 
 ```lua
-o.rebind("SUPER + CTRL + V", "Tomboy clipboard", "/home/me/Work/tomboy/target/release/tomboy clipboard")
+o.rebind("SUPER + CTRL + V", "Tomboy clipboard", "~/.cargo/bin/tomboy clipboard")
 ```
 
 Hyprland reloads the config on save; check it with `hyprctl configerrors`. The window floats
 on its own, like the launcher.
 
-## Build & run
+## Build from source
 
 ```sh
+git clone https://github.com/dzhibas/tomboy && cd tomboy
 cargo build --release
 ./target/release/tomboy
 ```
 
-Bind it in Hyprland (e.g. `~/.config/hypr/bindings.conf`); the window floats on its own:
+On a Hyprland without Omarchy's Lua config, bind it in `hyprland.conf` (or a file it sources);
+the window floats on its own:
 
 ```
-bind = SUPER ALT, SPACE, exec, ~/Work/tomboy/target/release/tomboy
+bind = SUPER, SPACE, exec, ~/.cargo/bin/tomboy
+bind = SUPER SHIFT, C, exec, ~/.cargo/bin/tomboy clipboard
 ```
 
-On Omarchy's Lua config (`~/.config/hypr/bindings.lua`):
-
-```lua
-o.rebind("SUPER + SPACE", "Tomboy launcher", "/home/me/Work/tomboy/target/release/tomboy")
-```
-
-For the clipboard history key, see [Bind it to a key in Hyprland](#bind-it-to-a-key-in-hyprland).
+On Omarchy, see [Install on Omarchy](#install-on-omarchy).
 
 ## Layout
 
