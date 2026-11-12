@@ -141,6 +141,33 @@ ghs = "gh tomboy"
 | --- | --- | --- | --- |
 | `directory` | string (path) | `~/Documents/tomboy/todo` | Where the daily todo lists live (see "Todos" below). `~` is home. Created when the first todo is added. Changing it doesn't move existing lists: offer to move the `.md` files if the user wants them along. |
 
+### `[hotkeys]` (macOS)
+
+| Key | Type | Default | What it does |
+| --- | --- | --- | --- |
+| `launcher` | string (chord) | `"alt+space"` | Global shortcut that shows the launcher. |
+| `clipboard` | string (chord) | `"cmd+shift+c"` | Shows the clipboard history (⌘⇧C; takes that chord from every app, e.g. Chrome's "inspect element"). |
+| `emoji` | string (chord) | `"ctrl+alt+e"` | Shows the emoji & symbol picker. |
+| `todo` | string (chord) | `"ctrl+alt+t"` | Shows today's todo list. |
+
+Only the macOS background launcher (`tomboy daemon`) uses these; on Linux the compositor's key
+bindings run tomboy. A chord is modifiers (`cmd`, `ctrl`, `alt`, `shift`) and a key joined by
+`+`, and needs `cmd`, `ctrl` or `alt`. `""` turns that shortcut off. They're read when the daemon
+starts, so tell the user to run `tomboy install-launch-agent` again (it restarts the daemon).
+`cmd+space` only works once Spotlight's own shortcut is turned off in System Settings.
+
+"Open the clipboard with cmd+shift+v" → `[hotkeys] clipboard = "cmd+shift+v"`; "make cmd+space
+open tomboy" → `launcher = "cmd+space"`; "turn off the emoji shortcut" → `emoji = ""`; "put the
+clipboard shortcut back" → delete the `clipboard` line (default `cmd+shift+c`). Write chords in
+lowercase with the names above (⌘ is `cmd`, ⌥ is `alt`, ⌃ is `ctrl`, ⇧ is `shift`). Don't run
+`tomboy install-launch-agent` yourself: it restarts the daemon this conversation runs in.
+
+### `[clipboard]`
+
+| Key | Type | Default | What it does |
+| --- | --- | --- | --- |
+| `paste` | boolean | `true` | macOS daemon: picking a clip or emoji also pastes it into the app in front (needs the Accessibility permission). `false` only copies. |
+
 Example:
 
 ```toml

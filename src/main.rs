@@ -22,6 +22,8 @@ mod config;
 mod dictation;
 mod emoji;
 mod frecency;
+#[cfg(target_os = "macos")]
+mod mac;
 // Omarchy is Linux-only; on macOS the module compiles but `Platform::Omarchy` never occurs.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod omarchy;
@@ -38,12 +40,14 @@ use rune::{
 };
 use rune_kit::Markdown;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use agent::{Block, Status};
 use answers::{Answer, Kind};
 use apps::AppEntry;
 use clipboard::Clip;
+use config::Hotkey;
 use omarchy::{Conditions, MenuItem};
 use platform::Platform;
 
@@ -117,6 +121,9 @@ struct Tomboy {
     /// Set by the dictation check with the prompt to hand to the agent.
     dictated: Arc<Mutex<Option<String>>>,
     waker: Option<Waker>,
+    /// Set by every background wake (agent output, currency rates, menu conditions), so
+    /// `poll` tells Rune the state changed and the window redraws without input.
+    woke: Arc<AtomicBool>,
     /// The agent conversation; while it exists tomboy shows it instead of search results.
     chat: Option<agent::Run>,
     /// The Omarchy submenu being browsed (`install`, `appearance.top-bar`); `None` at the root.
@@ -147,7 +154,22 @@ struct Tomboy {
     todo: Option<todo::Day>,
     /// Today's (done, total), for the launcher row; kept up to date as the list changes.
     todo_counts: (usize, usize),
+    /// Running as `tomboy daemon` (macOS): closing hides the window and resets it for the
+    /// next hotkey instead of quitting.
+    resident: bool,
+    /// This app's handle, for the daemon's hotkeys to show and hide the window.
+    me: Option<rune::AppHandle<Tomboy>>,
+    /// The daemon's window is on screen, and the hotkey that showed it.
+    shown: Option<Hotkey>,
+    /// A clip or emoji was just copied: paste it into the front app once the window hides.
+    paste: bool,
+    /// The window has had the keyboard since it last showed. Until then a focus loss is
+    /// stale (macOS reports one before a new window's first focus) and doesn't close it.
+    had_focus: bool,
 }
+
+/// Set by `tomboy daemon` before the app starts, for `init`.
+static RESIDENT: AtomicBool = AtomicBool::new(false);
 
 /// The emoji picker's grid for the current query, and the picked cell.
 struct EmojiView {
@@ -202,7 +224,7 @@ impl Item {
             Item::Agent(_) => "Ask Agent",
             Item::Clipboard => "Open Clipboard History",
             Item::Emoji => "Open Emoji Picker",
-            Item::Clip(_) => "Copy to Clipboard",
+            Item::Clip(_) => clip_action(s),
             Item::Quicklink { link, arg } => {
                 let l = &s.links[*link];
                 if l.arg.is_some() && arg.is_none() { "Enter Argument" }
@@ -233,19 +255,27 @@ fn init() -> Tomboy {
     query.focused = true;
     let apps = apps::load_apps();
     let platform = platform::detect();
+    let resident = RESIDENT.load(Ordering::Relaxed);
     let menu = match &platform {
         Platform::Omarchy { root } => omarchy::load(root),
-        Platform::Linux | Platform::MacOS => Vec::new(),
+        #[cfg(target_os = "macos")]
+        Platform::MacOS => mac::menu::items(resident),
+        _ => Vec::new(),
+    };
+    // Omarchy's conditions run in `setup`; the macOS commands have none, so all show at once.
+    let conds = match &platform {
+        Platform::MacOS => omarchy::evaluate(&menu, std::path::Path::new("/"), || {}),
+        _ => Conditions::default(),
     };
     let mut s = Tomboy {
         query, picked: 0, icons: vec![None; apps.len()], apps, cache: None,
-        platform, menu, conds: Conditions::default(), status,
-        last_text: String::new(), dictated: Arc::default(), waker: None, chat: None, submenu: None,
+        platform, menu, conds, status,
+        last_text: String::new(), dictated: Arc::default(), waker: None, woke: Arc::default(), chat: None, submenu: None,
         seed: answers::devtools::session_seed(), wake: Arc::new(|| {}),
         clips: None, direct: false, emoji: None, clip_image: None, frecency,
         links: quicklinks::load(&config), quicklink: None,
         todo: None, todo_counts: config.todo_dir().map_or((0, 0), |d| todo::peek(&d, todo::today_date())),
-        config,
+        config, resident, me: None, shown: None, paste: false, had_focus: false,
     };
     if rune::extra_args().iter().any(|a| a == "clipboard") {
         enter_clipboard(&mut s);
@@ -263,6 +293,13 @@ fn init() -> Tomboy {
 /// Start decoding every app's icon on Rune's image worker and checking the menu's shell
 /// conditions on a background pool; each result wakes the window.
 fn setup(s: &mut Tomboy, waker: Waker) {
+    let woke = s.woke.clone();
+    let waker: Waker = match s.me.clone() {
+        // A shown launcher panel (the daemon's) redraws only for an update that changed
+        // something, never for a bare wake, so wake it with one.
+        Some(me) => Arc::new(move || { woke.store(true, Ordering::Release); me.update_if(|_, _| true) }),
+        None => Arc::new(move || { woke.store(true, Ordering::Release); waker() }),
+    };
     let cache = ImageCache::new(waker.clone());
     s.icons = s.apps.iter().map(|a| a.icon.as_ref().map(|_| cache.app_icon(&a.path, ICON))).collect();
     s.cache = Some(cache);
@@ -310,11 +347,13 @@ fn on_change(s: &mut Tomboy, _: &mut Tx) {
     });
 }
 
-/// A confirmed dictation goes straight to the agent instead of the result list.
+/// Redraw after a background wake; a confirmed dictation goes straight to the agent instead
+/// of the result list.
 fn poll(s: &mut Tomboy, _: f64, tx: &mut Tx) -> bool {
-    let Some(prompt) = s.dictated.lock().unwrap_or_else(|e| e.into_inner()).take() else { return false };
-    if prompt != s.query.text { return false; } // edited since; treat it as typed
-    if chat_running(s) { return false; }
+    let woke = s.woke.swap(false, Ordering::AcqRel);
+    let Some(prompt) = s.dictated.lock().unwrap_or_else(|e| e.into_inner()).take() else { return woke };
+    if prompt != s.query.text { return woke; } // edited since; treat it as typed
+    if chat_running(s) { return woke; }
     run_item(s, &Item::Agent(prompt), tx);
     true
 }
@@ -451,7 +490,11 @@ fn run_item(s: &mut Tomboy, item: &Item, tx: &mut Tx) {
         }
         Item::Menu(i) => match &s.platform {
             Platform::Omarchy { root } => omarchy::run(&s.menu[*i], root).map(|()| After::Quit),
-            Platform::Linux | Platform::MacOS => Ok(After::Stay),
+            #[cfg(target_os = "macos")]
+            Platform::MacOS if s.menu[*i].id == mac::menu::QUIT_ID => { tx.quit(); Ok(After::Stay) }
+            #[cfg(target_os = "macos")]
+            Platform::MacOS => mac::menu::run(&s.menu[*i]).map(|()| After::Quit),
+            _ => Ok(After::Stay),
         },
         Item::WebSearch(q) => url::open(&format!("https://duckduckgo.com/?q={}", encode(q))).map(|()| After::Quit),
         Item::Agent(prompt) => ask_agent(s, prompt),
@@ -573,7 +616,7 @@ fn copy_emoji(s: &mut Tomboy, tx: &mut Tx) {
     let query = s.query.text.clone();
     s.frecency.record(&emoji_key(g.ch), &query, frecency::now());
     match sys::copy_to_clipboard(g.ch) {
-        Ok(true) => quit(s, tx),
+        Ok(true) => { s.paste = true; quit(s, tx) }
         Ok(false) => { tx.copy(g.ch); s.status = Some(format!("Copied {}", g.ch)); }
         Err(e) => s.status = Some(format!("Failed: {e}")),
     }
@@ -622,11 +665,15 @@ fn emoji_key_event(s: &mut Tomboy, ev: &KeyEvent, tx: &mut Tx) -> bool {
 /// Put clip `i` back on the clipboard and close.
 fn copy_clip(s: &mut Tomboy, i: usize, tx: &mut Tx) -> std::io::Result<After> {
     let Some(clip) = s.clips.as_ref().and_then(|c| c.get(i)).cloned() else { return Ok(After::Stay) };
-    if clip.copy()? { return Ok(After::Quit); }
+    if clip.copy()? { s.paste = true; return Ok(After::Quit); }
     match &clip {
         // No clipboard helper installed: copy in-process and stay open so the copy lives.
         Clip::Text(t) => { tx.copy(t); s.status = Some("Copied".into()); Ok(After::Stay) }
-        Clip::Image { .. } => Err(std::io::Error::other("no clipboard helper for images (install wl-clipboard)")),
+        Clip::Image { .. } => Err(std::io::Error::other(if cfg!(target_os = "linux") {
+            "no clipboard helper for images (install wl-clipboard)"
+        } else {
+            "couldn't put the image on the clipboard"
+        })),
     }
 }
 
@@ -738,10 +785,97 @@ fn chat_running(s: &Tomboy) -> bool {
     s.chat.as_ref().is_some_and(|r| r.lock().is_running())
 }
 
-/// Quit, stopping a running agent first (it runs in its own process group).
+/// Quit, stopping a running agent first (it runs in its own process group). The daemon
+/// hides instead, ready for the next hotkey.
 fn quit(s: &mut Tomboy, tx: &mut Tx) {
     if let Some(run) = &s.chat { run.stop(); }
-    tx.quit();
+    if s.resident { hide(s) } else { tx.quit() }
+}
+
+/// "Paste" when picking a clip (or emoji) also pastes it into the front app (the macOS daemon).
+fn clip_action(s: &Tomboy) -> &'static str {
+    if cfg!(target_os = "macos") && s.resident && s.config.paste() { "Paste" } else { "Copy to Clipboard" }
+}
+
+// ---- The resident launcher (`tomboy daemon`, macOS) ----
+
+/// Hide the daemon's window, paste what was just picked, and get ready for the next hotkey:
+/// a fresh launcher, with the config and apps read again (as a new launch would).
+fn hide(s: &mut Tomboy) {
+    if s.shown.take().is_none() { return; }
+    s.had_focus = false;
+    if let Some(me) = &s.me { me.hide(); }
+    #[cfg(target_os = "macos")]
+    if std::mem::take(&mut s.paste) && s.config.paste() {
+        mac::paste::paste_soon(std::time::Duration::from_millis(120));
+    }
+    s.paste = false;
+    if let Some(run) = s.chat.take() { run.stop(); }
+    reload(s);
+    fresh_view(s);
+}
+
+/// Back to an empty launcher: no open list, picker, submenu or conversation.
+fn fresh_view(s: &mut Tomboy) {
+    s.chat = None;
+    s.clips = None;
+    s.clip_image = None;
+    s.emoji = None;
+    s.todo = None;
+    s.quicklink = None;
+    s.direct = false;
+    enter_submenu(s, None);
+    s.query.focused = true;
+    *s.dictated.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    s.seed = answers::devtools::session_seed();
+}
+
+/// Read what a launch reads: the config (and its quicklinks), today's todo count and the
+/// installed apps, decoding icons only for apps that are new.
+fn reload(s: &mut Tomboy) {
+    let (config, error) = config::load();
+    s.links = quicklinks::load(&config);
+    s.todo_counts = config.todo_dir().map_or((0, 0), |d| todo::peek(&d, todo::today_date()));
+    s.config = config;
+    let apps = apps::load_apps();
+    if apps.iter().map(|a| &a.path).ne(s.apps.iter().map(|a| &a.path)) {
+        s.icons = apps.iter().map(|a| match (&a.icon, &s.cache) {
+            (Some(_), Some(cache)) => Some(cache.app_icon(&a.path, ICON)),
+            _ => None,
+        }).collect();
+        s.apps = apps;
+    }
+    s.status = error.or_else(|| s.config.warning());
+}
+
+/// A daemon hotkey: show the window in that mode, or hide it when that hotkey showed it.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn summon(s: &mut Tomboy, hotkey: Hotkey) {
+    let Some(me) = s.me.clone() else { return };
+    if s.shown == Some(hotkey) { hide(s); return; }
+    if s.shown.is_some() { fresh_view(s); }
+    match hotkey {
+        Hotkey::Launcher => {}
+        Hotkey::Clipboard => { enter_clipboard(s); s.direct = true; }
+        Hotkey::Emoji => { enter_emoji(s); s.direct = true; }
+        Hotkey::Todo => { enter_todo(s); s.direct = true; }
+    }
+    s.shown = Some(hotkey);
+    me.place(rune::DisplayTarget::UnderPointer, rune::OverlayPlacement::Edge {
+        edge: rune::ScreenEdge::Top, margin: 160.0, align: rune::Align::Center, inset: 0.0,
+    });
+    me.show();
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn hotkey_handler(hotkey: Hotkey) -> fn(&mut Tomboy, &mut Tx) {
+    match hotkey {
+        Hotkey::Launcher => |s, _| summon(s, Hotkey::Launcher),
+        Hotkey::Clipboard => |s, _| summon(s, Hotkey::Clipboard),
+        Hotkey::Emoji => |s, _| summon(s, Hotkey::Emoji),
+        Hotkey::Todo => |s, _| summon(s, Hotkey::Todo),
+    }
 }
 
 /// Copy through the OS helper (`wl-copy`, `pbcopy`, …) so the copy survives tomboy quitting;
@@ -1012,7 +1146,7 @@ fn clipboard_body(s: &Tomboy, t: &tok::Theme, accent: Color) -> (El, String, (&'
         let back = if s.direct { "esc to close" } else { "esc to go back" };
         format!("tomboy · {n} clip{} · {back}", if n == 1 { "" } else { "s" })
     });
-    let action = if picked.is_some() { "Copy to Clipboard" } else { "" };
+    let action = if picked.is_some() { clip_action(s) } else { "" };
     (body, left, (action, "↵"))
 }
 
@@ -1107,7 +1241,11 @@ fn emoji_body(s: &Tomboy, t: &tok::Theme, accent: Color) -> (El, String, (&'stat
         Some(g) => format!("{} · {}", g.title(), g.group),
         None => format!("tomboy · {}", if s.direct { "esc to close" } else { "esc to go back" }),
     });
-    let action = if picked_glyph(s).is_some() { "Copy Emoji" } else { "" };
+    let action = match picked_glyph(s) {
+        Some(_) if clip_action(s) == "Paste" => "Paste Emoji",
+        Some(_) => "Copy Emoji",
+        None => "",
+    };
     (body, left, (action, "↵"))
 }
 
@@ -1319,11 +1457,69 @@ fn main() {
             exit_on_error(dir.ok_or_else(|| std::io::Error::other("no home directory"))
                 .and_then(|d| todo::add_cli(&d, &args[2..].join(" "))))
         }
+        #[cfg(target_os = "macos")]
+        Some("daemon") => return run_daemon(),
+        #[cfg(target_os = "macos")]
+        Some("install-launch-agent") => exit_on_error(mac::launch_agent::install()),
+        #[cfg(target_os = "macos")]
+        Some("uninstall-launch-agent") => exit_on_error(mac::launch_agent::uninstall()),
+        #[cfg(not(target_os = "macos"))]
+        Some("daemon" | "install-launch-agent" | "uninstall-launch-agent") => exit_on_error(Err(std::io::Error::other(
+            "the background launcher is for macOS; on Linux bind `tomboy` to a key in your compositor"))),
         _ => {}
     }
     rune::set_app_id("tomboy");
     rune::prewarm_gpu();
-    let spec = AppSpec {
+    App::new(spec())
+        .window_options(WindowOptions { borderless: true, resizable: false, max_size: Some((WIDTH, HEIGHT)), ..Default::default() })
+        .float_on_open()
+        .on_focus(on_focus)
+        .run();
+}
+
+/// Clicking away closes the launcher (hides the daemon's), but not while a conversation is open.
+fn on_focus(s: &mut Tomboy, focused: bool, tx: &mut Tx) {
+    if focused { s.had_focus = true; return; }
+    if s.had_focus && s.chat.is_none() { quit(s, tx) }
+}
+
+/// `tomboy daemon`: stay running with no Dock icon, the window a hidden launcher panel that
+/// the `[hotkeys]` chords show, and record the clipboard history on a thread.
+#[cfg(target_os = "macos")]
+fn run_daemon() {
+    // One daemon at a time: a second would find the hotkeys taken.
+    let lock = sys::state_dir().map(|d| d.join("tomboy")).and_then(|d| {
+        std::fs::create_dir_all(&d).ok()?;
+        std::fs::File::create(d.join("daemon.lock")).ok()
+    });
+    if let Some(file) = &lock && file.try_lock().is_err() {
+        eprintln!("tomboy: the daemon is already running");
+        std::process::exit(0);
+    }
+    RESIDENT.store(true, Ordering::Relaxed);
+    std::thread::spawn(|| if let Err(e) = clipboard::watch() { eprintln!("tomboy: clipboard-watch: {e}") });
+    rune::set_app_id("tomboy");
+    rune::prewarm_gpu();
+    let config = config::load().0;
+    let mut app = App::new(spec()).accessory().keep_running()
+        .configured_options(WindowOptions::launcher_panel().macos(|native| native.corner_radius(12.0)))
+        // The panel preset's portable half, at tomboy's fixed size (its AppKit half stays).
+        .window_options(WindowOptions {
+            visible: false, borderless: true, transparent: true, resizable: false,
+            min_size: Some((WIDTH, HEIGHT)), max_size: Some((WIDTH, HEIGHT)), ..Default::default()
+        })
+        .on_focus(on_focus);
+    let me = app.handle();
+    app = app.init(move || Tomboy { me: Some(me), ..init() });
+    for hotkey in Hotkey::ALL {
+        if let Some(chord) = config.hotkey(hotkey) { app = app.global_shortcut(&chord, hotkey_handler(hotkey)); }
+    }
+    app.run();
+    drop(lock);
+}
+
+fn spec() -> AppSpec<Tomboy> {
+    AppSpec {
         min_size: Some((WIDTH, HEIGHT)),
         // Code in agent answers uses the system monospace font (fontconfig's `monospace`).
         families: ("Inter", "ui-monospace"),
@@ -1335,6 +1531,7 @@ fn main() {
             ("url", |s| s.query = TextEdit::new("github.com/anomalyco/rune")),
             ("web", |s| s.query = TextEdit::new("rust rune ui")),
             ("omarchy", |s| s.query = TextEdit::new("bar")),
+            ("system", |s| s.query = TextEdit::new("dark")),
             ("chat", chat_scene),
             ("submenu", |s| s.submenu = Some("learn".into())),
             ("units", |s| s.query = TextEdit::new("100 km to miles")),
@@ -1359,13 +1556,7 @@ fn main() {
             ("todo-add", |s| { s.todo_counts = (3, 7); s.query = TextEdit::new("todo buy milk"); }),
         ],
         ..AppSpec::new("tomboy", (WIDTH, HEIGHT), init, view)
-    };
-    App::new(spec)
-        .window_options(WindowOptions { borderless: true, resizable: false, max_size: Some((WIDTH, HEIGHT)), ..Default::default() })
-        .float_on_open()
-        // Clicking away closes the launcher, but not while a conversation is open.
-        .on_focus(|s, focused, tx| if !focused && s.chat.is_none() { tx.quit() })
-        .run();
+    }
 }
 
 fn exit_on_error(r: std::io::Result<()>) -> ! {

@@ -1,6 +1,6 @@
 [package]
 name = "tomboy"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 description = "A personal Raycast-style launcher built with Rune"
 
@@ -8,12 +8,32 @@ description = "A personal Raycast-style launcher built with Rune"
 jiff = "0.2.42"
 # Rune is pre-release: pin a rev of `dev` (never rewritten).
 rune = { git = "https://github.com/anomalyco/rune", rev = "27497964979dfe6575adfd60a5cb8f3b85240b6f" }
-rune-kit = { git = "https://github.com/anomalyco/rune", rev = "27497964979dfe6575adfd60a5cb8f3b85240b6f", version = "0.0.1", features = ["markdown"] }
+rune-kit = { git = "https://github.com/anomalyco/rune", rev = "27497964979dfe6575adfd60a5cb8f3b85240b6f", version = "0.0.1", features = [
+  "markdown",
+] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 sha2 = "0.11.1"
 toml = "1.2.1"
 ureq = "3.5"
+
+# The native clipboard (`src/mac/pasteboard.rs`); already in the tree through Rune's winit.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = [
+  "std",
+  "NSArray",
+  "NSData",
+  "NSDictionary",
+  "NSString",
+] }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+  "std",
+  "NSPasteboard",
+  "NSPasteboardItem",
+  "NSImageRep",
+  "NSBitmapImageRep",
+] }
 
 [profile.release]
 lto = "thin"
