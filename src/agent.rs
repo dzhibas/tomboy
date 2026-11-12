@@ -68,23 +68,29 @@ pub fn supports_headless(agent: &str) -> bool {
 
 /// The headless command for `agent`. Like Omarchy's own launcher, agents run unattended.
 /// Claude may also edit `extra_dirs` (tomboy's config and state), outside its working directory.
-fn headless_argv(agent: &str, prompt: &str, resume: Option<&str>, extra_dirs: &[PathBuf]) -> Option<Vec<String>> {
+/// `model` (`[agent.models]` in the config) is passed as the agent's model flag.
+fn headless_argv(agent: &str, prompt: &str, resume: Option<&str>, extra_dirs: &[PathBuf], model: Option<&str>)
+    -> Option<Vec<String>> {
     let s = |v: &[&str]| v.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+    let model = model.map(str::trim).filter(|m| !m.is_empty());
     let mut argv = match agent {
         "claude" => {
             let mut a = s(&["claude", "-p", "--output-format", "stream-json", "--include-partial-messages",
                 "--verbose", "--permission-mode", "auto", "--append-system-prompt", SKILL]);
             for dir in extra_dirs { a.extend(["--add-dir".into(), dir.display().to_string()]); }
+            if let Some(m) = model { a.extend(s(&["--model", m])); }
             if let Some(id) = resume { a.extend(s(&["--resume", id])); }
             a.push("--".into());
             a.push(prompt.to_string());
             return Some(a);
         }
-        "opencode" => s(&["opencode", "run", "--auto", "--"]),
-        "codex" => s(&["codex", "exec", "--"]),
+        "opencode" => s(&["opencode", "run", "--auto"]),
+        "codex" => s(&["codex", "exec"]),
         "crush" => s(&["crush", "run"]),
         _ => return None,
     };
+    if let Some(m) = model { argv.extend(s(&["-m", m])); }
+    if agent != "crush" { argv.push("--".into()); }
     // No system prompt flag shared by these; each turn is a fresh run, so the skill leads it.
     argv.push(format!("{SKILL}\n---\n\nThe user's request:\n\n{prompt}"));
     Some(argv)
@@ -124,6 +130,8 @@ pub struct Transcript {
     started: Instant,
     /// Where the agent runs.
     dir: Option<PathBuf>,
+    /// The model the agent is told to use (`[agent.models]`); `None` is its own default.
+    pub model: Option<String>,
 }
 
 impl Transcript {
@@ -154,16 +162,16 @@ pub struct Run(Arc<Mutex<Transcript>>);
 impl Run {
     /// `dir` is where the agent runs (`[agent] working_directory`, else ~/Work, else ~); it
     /// stays for the whole conversation, since a resumed session belongs to its directory.
-    pub fn new(agent: String, dir: Option<PathBuf>) -> Self {
+    pub fn new(agent: String, dir: Option<PathBuf>, model: Option<String>) -> Self {
         Run(Arc::new(Mutex::new(Transcript {
-            agent, dir, blocks: Vec::new(), status: Status::Done { secs: 0.0, cost_usd: None },
+            agent, dir, model, blocks: Vec::new(), status: Status::Done { secs: 0.0, cost_usd: None },
             session: None, pgid: None, turn: 0, started: Instant::now(),
         })))
     }
 
     /// A finished transcript, for headless snapshots.
     pub fn demo(agent: &str, blocks: &[Block], status: Status) -> Self {
-        let run = Run::new(agent.into(), None);
+        let run = Run::new(agent.into(), None, None);
         { let mut t = run.lock(); t.blocks = blocks.to_vec(); t.status = status; }
         run
     }
@@ -175,16 +183,16 @@ impl Run {
     /// Start a turn: run the agent on `prompt` (continuing the session when there is one) and
     /// stream its output into the transcript, calling `wake` whenever it changes.
     pub fn start(&self, prompt: &str, wake: impl Fn() + Send + Sync + 'static) -> io::Result<()> {
-        let (agent, session, dir) = {
+        let (agent, session, dir, model) = {
             let t = self.lock();
-            (t.agent.clone(), t.session.clone(), t.dir.clone())
+            (t.agent.clone(), t.session.clone(), t.dir.clone(), t.model.clone())
         };
         // tomboy's config and state directories (config.toml, frecency.json), created so the
         // agent may write into them.
         let extra_dirs: Vec<PathBuf> = [config::path().and_then(|p| p.parent().map(PathBuf::from)),
                                         sys::state_dir().map(|d| d.join("tomboy"))]
             .into_iter().flatten().filter(|d| std::fs::create_dir_all(d).is_ok()).collect();
-        let argv = headless_argv(&agent, prompt, session.as_deref(), &extra_dirs)
+        let argv = headless_argv(&agent, prompt, session.as_deref(), &extra_dirs, model.as_deref())
             .ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, format!("{agent} has no headless mode")))?;
         let mut cmd = Command::new(&argv[0]);
         cmd.args(&argv[1..]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -309,7 +317,7 @@ mod tests {
 
     fn transcript() -> Transcript {
         Transcript { agent: "claude".into(), blocks: vec![Block::Prompt("hi".into())], status: Status::Running,
-            session: None, pgid: None, turn: 1, started: Instant::now(), dir: None }
+            session: None, pgid: None, turn: 1, started: Instant::now(), dir: None, model: None }
     }
 
     #[test]
@@ -356,12 +364,20 @@ mod tests {
 
     #[test]
     fn headless_commands() {
-        let claude = headless_argv("claude", "hi", Some("s1"), &["/c/tomboy".into(), "/s/tomboy".into()]).unwrap();
+        let claude = headless_argv("claude", "hi", Some("s1"), &["/c/tomboy".into(), "/s/tomboy".into()], None).unwrap();
         assert_eq!(claude[8..], ["--append-system-prompt", SKILL, "--add-dir", "/c/tomboy", "--add-dir", "/s/tomboy", "--resume", "s1", "--", "hi"]);
-        let codex = headless_argv("codex", "-x", None, &[]).unwrap();
+        let codex = headless_argv("codex", "-x", None, &[], None).unwrap();
         assert_eq!(codex[..3], ["codex", "exec", "--"]);
         assert!(codex[3].starts_with(SKILL) && codex[3].ends_with("\n\n-x"));
-        assert!(headless_argv("hermes", "hi", None, &[]).is_none());
+        assert!(headless_argv("hermes", "hi", None, &[], None).is_none());
+        // A configured model goes in as the agent's model flag.
+        let claude = headless_argv("claude", "hi", None, &[], Some("haiku")).unwrap();
+        assert_eq!(claude[claude.len() - 4..], ["--model", "haiku", "--", "hi"]);
+        let codex = headless_argv("codex", "hi", None, &[], Some(" gpt-5 ")).unwrap();
+        assert_eq!(codex[..5], ["codex", "exec", "-m", "gpt-5", "--"]);
+        let crush = headless_argv("crush", "hi", None, &[], Some("sonnet")).unwrap();
+        assert_eq!(crush[..4], ["crush", "run", "-m", "sonnet"]);
+        assert!(!headless_argv("claude", "hi", None, &[], Some("  ")).unwrap().contains(&"--model".to_string()));
         assert!(supports_headless("opencode") && !supports_headless("pi"));
     }
 
@@ -369,7 +385,7 @@ mod tests {
     #[test]
     #[ignore]
     fn live_claude_streams_an_answer_and_a_follow_up() {
-        let run = Run::new("claude".into(), None);
+        let run = Run::new("claude".into(), None, None);
         let wait = |run: &Run| {
             let deadline = Instant::now() + std::time::Duration::from_secs(120);
             while run.lock().is_running() && Instant::now() < deadline {
@@ -394,7 +410,7 @@ mod tests {
 
     #[test]
     fn plain_text_lines_join_into_one_answer() {
-        let run = Run::new("crush".into(), None);
+        let run = Run::new("crush".into(), None, None);
         let mut t = run.lock();
         t.push_text("a\n");
         t.push_text("b\n");

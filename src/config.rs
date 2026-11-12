@@ -9,6 +9,10 @@
 //! # Where "Ask agent" runs the coding agent. Default: ~/Work, or ~ when that doesn't exist.
 //! working_directory = "~/sites"
 //!
+//! [agent.models]
+//! # The model each agent uses, by agent command. Default: the agent's own default.
+//! claude = "haiku"
+//!
 //! [search]
 //! # Rank by what you launch, how often and what you typed (frecency). Default true.
 //! frecency = false
@@ -60,6 +64,8 @@ pub struct AgentConfig {
     pub name: Option<String>,
     /// Where the agent runs; `~` expands to $HOME.
     pub working_directory: Option<String>,
+    /// The model each agent uses, by agent command (`claude = "haiku"`); unset is its default.
+    pub models: std::collections::BTreeMap<String, String>,
 }
 
 impl Config {
@@ -71,6 +77,11 @@ impl Config {
         }
         let work = home.join("Work");
         Some(if work.is_dir() { work } else { home })
+    }
+
+    /// The configured model for `agent`, if any.
+    pub fn agent_model(&self, agent: &str) -> Option<String> {
+        self.agent.models.get(agent).map(|m| m.trim().to_string()).filter(|m| !m.is_empty())
     }
 
     /// Whether search learns from launches and ranks by them (default on).
@@ -142,6 +153,11 @@ mod tests {
         let (c, err) = parse("[agent]\nname = \"codex\"\nworking_directory = \"~/sites\"\n");
         assert_eq!(err, None);
         assert_eq!(c.agent.name.as_deref(), Some("codex"));
+        let (m, err) = parse("[agent]\nname = \"claude\"\n\n[agent.models]\nclaude = \"haiku\"\ncodex = \" \"\n");
+        assert_eq!(err, None);
+        assert_eq!(m.agent_model("claude").as_deref(), Some("haiku"));
+        assert_eq!(m.agent_model("codex"), None);
+        assert_eq!(m.agent_model("opencode"), None);
         assert_eq!(c.agent.working_directory.as_deref(), Some("~/sites"));
         let (c, err) = parse("[agent]\nworking_dir = \"x\"\n");
         assert_eq!(c, Config::default());

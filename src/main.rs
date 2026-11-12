@@ -395,7 +395,8 @@ fn ask_agent(s: &mut Tomboy, prompt: &str) -> std::io::Result<After> {
             if !agent::supports_headless(&name) {
                 return agent::ask(prompt, &s.platform, forced).map(|()| After::Quit);
             }
-            agent::Run::new(name, s.config.agent_dir())
+            let model = s.config.agent_model(&name);
+            agent::Run::new(name, s.config.agent_dir(), model)
         }
     };
     let waker = s.waker.clone();
@@ -887,7 +888,8 @@ fn chat_body(s: &Tomboy, run: &agent::Run, dark: bool, t: &tok::Theme) -> (El, S
         Status::Done { secs, cost_usd: None } => format!("Done in {secs:.1}s"),
         Status::Failed(e) => format!("Failed: {e}"),
     };
-    let left = s.status.clone().unwrap_or_else(|| format!("{} · {state}", tr.agent));
+    let who = match &tr.model { Some(m) => format!("{} ({m})", tr.agent), None => tr.agent.clone() };
+    let left = s.status.clone().unwrap_or_else(|| format!("{who} · {state}"));
     let action = if running { ("Stop", "esc") }
         else if s.query.text.trim().is_empty() { ("Copy Answer", "↵") }
         else { ("Send Follow-up", "↵") };

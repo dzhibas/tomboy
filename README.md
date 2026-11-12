@@ -74,6 +74,10 @@ name = "codex"
 # Where "Ask agent" runs the coding agent. Default: ~/Work, or ~ when that doesn't exist.
 working_directory = "~/sites"
 
+[agent.models]
+# The model each agent uses, by agent command. Default: the agent's own default.
+claude = "haiku"
+
 [search]
 # Rank by what you launch, how often and what you typed (frecency). Default true.
 frecency = false
@@ -86,6 +90,7 @@ font_size = 15
 | Setting | Default | What it does |
 | --- | --- | --- |
 | `agent.name` | Omarchy's default, else `$TOMBOY_AGENT`, else `claude` | The coding agent CLI for "Ask agent", overriding the system's choice (Omarchy's default agent is left as it is). `claude`, `opencode`, `codex` and `crush` answer inside tomboy; any other CLI opens in a terminal. |
+| `agent.models.<agent>` | the agent's default | The model an agent runs with: `claude = "haiku"` (or `sonnet`, `opus`, a full id), `codex = "gpt-5"`, `opencode = "anthropic/claude-sonnet-5-5"`. Passed as the agent's `--model`/`-m`; the chat footer shows it. |
 | `agent.working_directory` | `~/Work`, else `~` | The agent's working directory. `~` is home; relative paths start at home. A missing directory falls back to the default. |
 | `search.frecency` | `true` | Learn from launches and rank by them (frecency, see the feature list). `false` ranks by name match only and records nothing; the history file is kept for when it's back on. |
 | `ui.font_size` | `13` | Text size in points (9–24). The search field, titles, labels and agent answers scale with it and rows grow to fit; icons and the window size stay. |
@@ -104,6 +109,8 @@ in the launcher:
 > make the font bigger
 
 > switch the agent to codex
+
+> use haiku
 
 and the agent writes `config.toml` for you and tells you it applies on the next launch. Claude
 gets the skill as an appended system prompt (`--append-system-prompt`, with `--add-dir

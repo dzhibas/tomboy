@@ -8,7 +8,7 @@ window as Markdown: keep it short.
 ## Changing tomboy's settings
 
 When the user asks to change how tomboy behaves ("change the working directory to ~/sites",
-"run the agent in my projects folder", "use codex instead", "make the text bigger", "font size 16", "what can I
+"run the agent in my projects folder", "use codex instead", "use haiku", "make the text bigger", "font size 16", "what can I
 configure in tomboy?"), edit tomboy's config file. Do not edit tomboy's source code for this.
 
 - **File**: `~/.config/tomboy/config.toml` (`$XDG_CONFIG_HOME/tomboy/config.toml` when that is set).
@@ -27,6 +27,7 @@ configure in tomboy?"), edit tomboy's config file. Do not edit tomboy's source c
 | Key | Type | Default | What it does |
 | --- | --- | --- | --- |
 | `name` | string (command) | Omarchy's default agent (`omarchy default agent`) on Omarchy, else `$TOMBOY_AGENT`, else `claude` | The coding agent CLI tomboy runs for "Ask agent", overriding the system's choice. tomboy runs `claude`, `opencode`, `codex` and `crush` inside its own window; any other CLI (`pi`, `amp`, `gemini`, …) opens in a terminal with the prompt. |
+| `models` | table: agent command → model | each agent's own default | The model each agent runs with, keyed by the agent's command name, as the table `[agent.models]`. tomboy passes it as the agent's model flag (`claude --model`, `codex -m`, `opencode -m`, `crush -m`). Only agents that answer inside tomboy use it. |
 | `working_directory` | string (path) | `~/Work`, or `~` if that doesn't exist | The directory "Ask agent" runs the coding agent in. `~` means the home directory; a relative path is taken from home. If the directory doesn't exist tomboy falls back to the default and warns in its footer. |
 
 ### `[search]`
@@ -53,6 +54,25 @@ so and don't change the file. To go back to the system's default agent, delete t
 line. Say whether the new agent answers inside tomboy (claude, opencode, codex, crush) or
 opens in a terminal. This only changes tomboy; don't run `omarchy default agent`.
 
+Choosing a model ("use haiku", "switch claude to sonnet", "use opus again", "codex should use
+gpt-5"): set the model for the agent the request names, or else the current agent. That's
+`[agent] name` if set, otherwise the system default, which you are. Write it under
+`[agent.models]` with the agent's command as the key:
+
+```toml
+[agent.models]
+claude = "haiku"
+```
+
+- Claude takes the aliases `haiku`, `sonnet`, `opus` (always the latest of each) or a full
+  model id such as `claude-sonnet-5-5`. Prefer the alias unless the user names a version.
+- opencode wants `provider/model` (`anthropic/claude-sonnet-5-5`); codex and crush take their
+  own model names. If you don't know a valid name for that agent, ask rather than guess.
+- "Use the default model" or "reset the model" deletes that agent's line, and the table when
+  it's empty.
+- Mention the model takes effect from the next conversation. The footer then reads
+  `claude (haiku) · …`.
+
 Font size: relative requests change the current value (13 when unset) in steps of 2 points:
 "bigger"/"increase the font" → +2, "much bigger" → +4, "smaller"/"decrease" → -2,
 "reset the font size" → delete the `font_size` line. Never go outside 9–24; if a step would,
@@ -64,6 +84,10 @@ Example:
 [agent]
 name = "codex"
 working_directory = "~/sites"
+
+[agent.models]
+claude = "haiku"
+codex = "gpt-5"
 
 [search]
 frecency = false
