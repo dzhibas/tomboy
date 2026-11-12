@@ -19,7 +19,8 @@ All OS commands live in `src/sys.rs` and `src/apps/{linux,macos}.rs` behind `#[c
   your usual apps come first. It only reorders matches, never adds one. Stored in
   `~/.local/state/tomboy/frecency.json`; delete it to start over, or ask the agent: "forget
   hackernews" drops one item, "news shouldn't pick hackernews" drops one learned query, "reset
-  usage counts" clears it all.
+  usage counts" clears it all. Turn it off with `[search] frecency = false` (or "turn off
+  frecency").
 - **Calculator**: `2+2`, `(2+2)*10/3`, `sqrt(16)`, `2^10`, `sin(pi/2)` — Enter copies the answer (`wl-copy`).
   Percentages work like a phone calculator: `15% of 200` = 30, `15% off 200` = 170,
   `200 + 15%` = 230, `200 - 15%` = 170; `10 % 3` is still modulo.
@@ -71,6 +72,10 @@ name = "codex"
 # Where "Ask agent" runs the coding agent. Default: ~/Work, or ~ when that doesn't exist.
 working_directory = "~/sites"
 
+[search]
+# Rank by what you launch, how often and what you typed (frecency). Default true.
+frecency = false
+
 [ui]
 # Text size in points; titles, labels and agent answers scale with it. Default 13.
 font_size = 15
@@ -80,6 +85,7 @@ font_size = 15
 | --- | --- | --- |
 | `agent.name` | Omarchy's default, else `$TOMBOY_AGENT`, else `claude` | The coding agent CLI for "Ask agent", overriding the system's choice (Omarchy's default agent is left as it is). `claude`, `opencode`, `codex` and `crush` answer inside tomboy; any other CLI opens in a terminal. |
 | `agent.working_directory` | `~/Work`, else `~` | The agent's working directory. `~` is home; relative paths start at home. A missing directory falls back to the default. |
+| `search.frecency` | `true` | Learn from launches and rank by them (frecency, see the feature list). `false` ranks by name match only and records nothing; the history file is kept for when it's back on. |
 | `ui.font_size` | `13` | Text size in points (9–24). The search field, titles, labels and agent answers scale with it and rows grow to fit; icons and the window size stay. |
 
 A file that doesn't parse, or has an unknown key, is ignored as a whole; the footer says why

@@ -9,6 +9,10 @@
 //! # Where "Ask agent" runs the coding agent. Default: ~/Work, or ~ when that doesn't exist.
 //! working_directory = "~/sites"
 //!
+//! [search]
+//! # Rank by what you launch, how often and what you typed (frecency). Default true.
+//! frecency = false
+//!
 //! [ui]
 //! # Text size in points for list rows; titles and labels scale with it. Default 13.
 //! font_size = 15
@@ -27,6 +31,14 @@ use crate::sys;
 pub struct Config {
     pub agent: AgentConfig,
     pub ui: UiConfig,
+    pub search: SearchConfig,
+}
+
+#[derive(Debug, Default, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct SearchConfig {
+    /// Rank by launch history (`crate::frecency`); on unless set to `false`.
+    pub frecency: Option<bool>,
 }
 
 /// The default `ui.font_size`: Rune's body text size.
@@ -59,6 +71,11 @@ impl Config {
         }
         let work = home.join("Work");
         Some(if work.is_dir() { work } else { home })
+    }
+
+    /// Whether search learns from launches and ranks by them (default on).
+    pub fn frecency(&self) -> bool {
+        self.search.frecency.unwrap_or(true)
     }
 
     /// How much bigger than default the text is: `ui.font_size / 13`, within [`FONT_SIZE_RANGE`].
@@ -130,6 +147,15 @@ mod tests {
         assert_eq!(c, Config::default());
         assert!(err.unwrap().contains("unknown field"));
         assert!(parse("[agent").1.is_some());
+    }
+
+    #[test]
+    fn frecency_switch() {
+        assert!(parse("").0.frecency());
+        assert!(parse("[search]\nfrecency = true\n").0.frecency());
+        let (c, err) = parse("[search]\nfrecency = false\n");
+        assert_eq!(err, None);
+        assert!(!c.frecency());
     }
 
     #[test]

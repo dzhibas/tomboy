@@ -180,6 +180,7 @@ enum After {
 
 fn init() -> Tomboy {
     let (config, config_error) = config::load();
+    let frecency = if config.frecency() { frecency::Store::load() } else { frecency::Store::off() };
     ty::set_scale(config.font_scale());
     let status = config_error.or_else(|| config.warning());
     let mut query = TextEdit::new("");
@@ -195,7 +196,7 @@ fn init() -> Tomboy {
         platform, menu, conds: Conditions::default(), status,
         last_text: String::new(), dictated: Arc::default(), waker: None, chat: None, submenu: None,
         seed: answers::devtools::session_seed(), wake: Arc::new(|| {}),
-        clips: None, clips_direct: false, clip_image: None, config, frecency: frecency::Store::load(),
+        clips: None, clips_direct: false, clip_image: None, frecency, config,
     };
     if rune::extra_args().iter().any(|a| a == "clipboard") {
         enter_clipboard(&mut s);

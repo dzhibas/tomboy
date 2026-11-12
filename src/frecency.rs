@@ -43,6 +43,8 @@ struct Entry {
 pub struct Store {
     path: Option<PathBuf>,
     items: BTreeMap<String, Entry>,
+    /// `[search] frecency = false`: no boosts, nothing recorded, the file left as it is.
+    off: bool,
 }
 
 /// Now, in unix seconds.
@@ -59,11 +61,18 @@ impl Store {
     pub fn load() -> Store {
         let path = sys::state_dir().map(|d| d.join("tomboy/frecency.json"));
         let items = path.as_deref().map(read).unwrap_or_default();
-        Store { path, items }
+        Store { path, items, off: false }
+    }
+
+    /// A store that ranks nothing and records nothing (frecency turned off in the config).
+    /// The history file stays, so turning it back on picks up where it was.
+    pub fn off() -> Store {
+        Store { off: true, ..Store::default() }
     }
 
     /// Points to add to `key`'s match score for `query`, at `now`.
     pub fn boost(&self, key: &str, query: &str, now: u64) -> u32 {
+        if self.off { return 0; }
         let Some(e) = self.items.get(key) else { return 0 };
         let weight: u32 = e.visits.iter().map(|&t| age_weight(now.saturating_sub(t))).sum();
         // Ten visits this week (1000) is the cap; one is 15, enough to win a tie.
@@ -79,6 +88,7 @@ impl Store {
     /// Note a launch of `key` typed as `query`, and save. The file is read again first, so an
     /// edit made while tomboy was open (the agent forgetting an item) isn't written back over.
     pub fn record(&mut self, key: &str, query: &str, now: u64) {
+        if self.off { return; }
         if let Some(path) = &self.path { self.items = read(path); }
         let e = self.items.entry(key.to_string()).or_default();
         e.visits.push(now);
@@ -159,6 +169,14 @@ mod tests {
     }
 
     #[test]
+    fn off_ranks_and_records_nothing() {
+        let mut s = Store::off();
+        s.record("app:a", "a", NOW);
+        assert!(s.items.is_empty());
+        assert_eq!(s.boost("app:a", "a", NOW), 0);
+    }
+
+    #[test]
     fn forgets_old_items_and_rare_queries() {
         let mut s = store();
         s.record("app:old", "x", NOW - 200 * DAY);
@@ -172,7 +190,7 @@ mod tests {
     fn round_trips_through_disk() {
         let dir = std::env::temp_dir().join(format!("tomboy-frecency-{}", std::process::id()));
         let path = dir.join("tomboy/frecency.json");
-        let mut s = Store { path: Some(path.clone()), items: BTreeMap::new() };
+        let mut s = Store { path: Some(path.clone()), ..Store::default() };
         s.record("menu:system.lock", "lock", NOW);
         let back = read(&path);
         assert_eq!(back, s.items);

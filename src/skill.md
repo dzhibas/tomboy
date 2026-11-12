@@ -29,6 +29,17 @@ configure in tomboy?"), edit tomboy's config file. Do not edit tomboy's source c
 | `name` | string (command) | Omarchy's default agent (`omarchy default agent`) on Omarchy, else `$TOMBOY_AGENT`, else `claude` | The coding agent CLI tomboy runs for "Ask agent", overriding the system's choice. tomboy runs `claude`, `opencode`, `codex` and `crush` inside its own window; any other CLI (`pi`, `amp`, `gemini`, …) opens in a terminal with the prompt. |
 | `working_directory` | string (path) | `~/Work`, or `~` if that doesn't exist | The directory "Ask agent" runs the coding agent in. `~` means the home directory; a relative path is taken from home. If the directory doesn't exist tomboy falls back to the default and warns in its footer. |
 
+### `[search]`
+
+| Key | Type | Default | What it does |
+| --- | --- | --- | --- |
+| `frecency` | boolean | `true` | Rank search results by what the user launches, how often and recently, and what they typed to launch it (see "Search ranking" below). `false` turns it off completely: results rank by name match only, nothing is recorded, and an empty field lists apps alphabetically. The usage history file is kept, so turning it back on resumes where it was. |
+
+"Turn off frecency", "stop learning what I launch", "disable smart ranking" → set
+`[search] frecency = false`. "Turn it back on" → delete the line (it's on by default). If the
+user also wants the history gone ("turn it off and forget everything"), delete the history
+file too.
+
 ### `[ui]`
 
 | Key | Type | Default | What it does |
@@ -53,6 +64,9 @@ Example:
 [agent]
 name = "codex"
 working_directory = "~/sites"
+
+[search]
+frecency = false
 
 [ui]
 font_size = 15
@@ -80,6 +94,9 @@ pick for a query (`news` → hackernews). The history is a separate file, not th
   `org.gnome.Nautilus.desktop`): match the user's words against the keys, and if none fits,
   look up `Name=` in the `.desktop` files under `~/.local/share/applications` and
   `/usr/share/applications`.
+
+If `[search] frecency = false` is set, the history isn't used or updated; forgetting items
+still works and applies once it is turned back on.
 
 What to do:
 
