@@ -28,6 +28,7 @@ mod omarchy;
 mod platform;
 mod quicklinks;
 mod sys;
+mod todo;
 mod url;
 
 use rune::tok::{self, type_};
@@ -142,6 +143,10 @@ struct Tomboy {
     links: Vec<quicklinks::Quicklink>,
     /// The quicklink whose argument is being typed (argument mode).
     quicklink: Option<usize>,
+    /// Today's todo list, while it's open.
+    todo: Option<todo::Day>,
+    /// Today's (done, total), for the launcher row; kept up to date as the list changes.
+    todo_counts: (usize, usize),
 }
 
 /// The emoji picker's grid for the current query, and the picked cell.
@@ -171,6 +176,12 @@ enum Item {
     Clip(usize),
     /// A quicklink, with the argument typed for it so far.
     Quicklink { link: usize, arg: Option<String> },
+    /// "Today · 3/10 done" in the launcher.
+    Todo,
+    /// `todo buy milk`: add it to today's list.
+    TodoAdd(String),
+    /// A task in the open list, by its place in `Day::tasks`.
+    Task(usize),
 }
 
 impl Item {
@@ -197,6 +208,12 @@ impl Item {
                 if l.arg.is_some() && arg.is_none() { "Enter Argument" }
                 else if l.is_web() { "Open in Browser" } else { "Open Link" }
             }
+            Item::Todo => "Open Todo List",
+            Item::TodoAdd(_) => "Add Todo",
+            Item::Task(i) => match s.todo.as_ref().and_then(|d| d.tasks().get(*i).map(|t| t.done)) {
+                Some(true) => "Mark Open",
+                _ => "Mark Done",
+            },
         }
     }
 }
@@ -226,13 +243,18 @@ fn init() -> Tomboy {
         last_text: String::new(), dictated: Arc::default(), waker: None, chat: None, submenu: None,
         seed: answers::devtools::session_seed(), wake: Arc::new(|| {}),
         clips: None, direct: false, emoji: None, clip_image: None, frecency,
-        links: quicklinks::load(&config), quicklink: None, config,
+        links: quicklinks::load(&config), quicklink: None,
+        todo: None, todo_counts: config.todo_dir().map_or((0, 0), |d| todo::peek(&d, todo::today_date())),
+        config,
     };
     if rune::extra_args().iter().any(|a| a == "clipboard") {
         enter_clipboard(&mut s);
         s.direct = true;
     } else if rune::extra_args().iter().any(|a| a == "emoji") {
         enter_emoji(&mut s);
+        s.direct = true;
+    } else if rune::extra_args().iter().any(|a| a == "todo") {
+        enter_todo(&mut s);
         s.direct = true;
     }
     s
@@ -268,6 +290,10 @@ fn on_change(s: &mut Tomboy, _: &mut Tx) {
         rebuild_emoji(s);
         return;
     }
+    if s.todo.is_some() {
+        s.last_text = s.query.text.clone();
+        return;
+    }
     let burst = dictation::inserted(&s.last_text, &s.query.text).to_string();
     s.last_text = s.query.text.clone();
     if burst.trim().chars().count() < dictation::MIN_BURST { return; }
@@ -299,6 +325,7 @@ fn results(s: &Tomboy) -> Vec<Item> {
         return clipboard::search(clips, q).into_iter().map(Item::Clip).collect();
     }
     if s.emoji.is_some() { return Vec::new(); } // the picker draws its own grid
+    if let Some(day) = &s.todo { return (0..day.tasks().len()).map(Item::Task).collect(); }
     if let Some(id) = &s.submenu {
         // Inside a submenu: its rows, or a search of everything under it.
         let rows = if q.is_empty() { omarchy::children_of(&s.menu, &s.conds, id) }
@@ -324,6 +351,13 @@ fn search(s: &Tomboy, q: &str) -> Vec<Item> {
     let link_item = |h: &quicklinks::Hit| Item::Quicklink { link: h.link, arg: h.arg.map(str::to_string) };
     // The keyword typed in full (`jira`, `jira ABC-1`) goes first; a prefix sits with the commands.
     let mut items: Vec<Item> = links.iter().filter(|h| h.exact).map(link_item).collect();
+    if let Some(task) = todo::quick_add(q) {
+        items.push(Item::TodoAdd(task.to_string()));
+    }
+    // Today's list: asked for, or first on an empty launcher when there's something on it.
+    if todo::matches_command(q) || (q.is_empty() && s.todo_counts.1 > 0) {
+        items.push(Item::Todo);
+    }
     if let Some(v) = calc::eval(q) {
         items.push(Item::Calc { expr: q.to_string(), value: calc::format(v) });
     }
@@ -424,6 +458,9 @@ fn run_item(s: &mut Tomboy, item: &Item, tx: &mut Tx) {
         Item::Clipboard => { enter_clipboard(s); Ok(After::Stay) }
         Item::Emoji => { enter_emoji(s); Ok(After::Stay) }
         Item::Clip(i) => copy_clip(s, *i, tx),
+        Item::Todo => { enter_todo(s); Ok(After::Stay) }
+        Item::TodoAdd(text) => add_todo(s, text).map(|()| After::Stay),
+        Item::Task(i) => toggle_task(s, *i).map(|()| After::Stay),
         Item::Quicklink { link, arg } => match (&s.links[*link].arg, arg) {
             (Some(_), None) => { enter_quicklink(s, Some(*link)); Ok(After::Stay) }
             (_, arg) => url::open(&s.links[*link].expand(arg.as_deref().unwrap_or(""))).map(|()| After::Quit),
@@ -542,6 +579,21 @@ fn copy_emoji(s: &mut Tomboy, tx: &mut Tx) {
     }
 }
 
+/// Esc, Space and Delete in the todo list (arrows and Enter work as in any list).
+fn todo_key_event(s: &mut Tomboy, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    let empty = s.query.text.is_empty();
+    let result = match &ev.key {
+        Key::Escape if !empty => { s.query.clear(); s.last_text.clear(); Ok(()) }
+        Key::Escape if s.direct => { quit(s, tx); Ok(()) }
+        Key::Escape | Key::Backspace if empty => { leave_todo(s); Ok(()) }
+        Key::Text(t) if empty && t == " " && !ev.mods.cmd => toggle_task(s, s.picked),
+        Key::Delete if empty => remove_task(s, s.picked),
+        _ => return false,
+    };
+    if let Err(e) = result { s.status = Some(format!("Failed: {e}")); }
+    true
+}
+
 /// Arrow keys, Tab and Esc in the picker.
 fn emoji_key_event(s: &mut Tomboy, ev: &KeyEvent, tx: &mut Tx) -> bool {
     let Some(v) = &mut s.emoji else { return false };
@@ -600,6 +652,69 @@ fn enter_submenu(s: &mut Tomboy, id: Option<String>) {
     s.status = None;
 }
 
+/// Open today's list (carrying over yesterday's open tasks on a day's first open).
+fn enter_todo(s: &mut Tomboy) {
+    let Some(dir) = s.config.todo_dir() else { s.status = Some("No home directory for the todo list".into()); return };
+    match todo::today(&dir, todo::today_date()) {
+        Ok(day) => {
+            s.todo_counts = day.counts();
+            s.todo = Some(day);
+            s.query.clear();
+            s.last_text.clear();
+            s.picked = 0;
+            s.status = None;
+        }
+        Err(e) => s.status = Some(format!("Todo list: {e}")),
+    }
+}
+
+fn leave_todo(s: &mut Tomboy) {
+    s.todo = None;
+    enter_submenu(s, s.submenu.clone());
+}
+
+/// Add `text` to today's list: the open one, or (a quick add from the launcher) today's file
+/// without opening the list.
+fn add_todo(s: &mut Tomboy, text: &str) -> std::io::Result<()> {
+    let counts = match s.todo.as_mut() {
+        Some(day) => day.add(text).map(|_| day.counts()),
+        None => {
+            let dir = s.config.todo_dir().ok_or_else(|| std::io::Error::other("no home directory"))?;
+            todo::today(&dir, todo::today_date()).and_then(|mut day| day.add(text).map(|_| day.counts()))
+        }
+    }?;
+    s.todo_counts = counts;
+    s.query.clear();
+    s.last_text.clear();
+    s.picked = 0;
+    s.status = Some(format!("Added “{}” · {}/{} done", text.trim(), counts.0, counts.1));
+    Ok(())
+}
+
+/// Check or uncheck task `i` of the open list.
+fn toggle_task(s: &mut Tomboy, i: usize) -> std::io::Result<()> {
+    let Some(day) = s.todo.as_mut() else { return Ok(()) };
+    let Some(task) = day.tasks().get(i).cloned() else { return Ok(()) };
+    if !day.toggle(&task)? { s.status = Some("The list changed on disk; reloaded".into()); }
+    s.todo_counts = day.counts();
+    Ok(())
+}
+
+/// Delete task `i` of the open list.
+fn remove_task(s: &mut Tomboy, i: usize) -> std::io::Result<()> {
+    let Some(day) = s.todo.as_mut() else { return Ok(()) };
+    let Some(task) = day.tasks().get(i).cloned() else { return Ok(()) };
+    if day.remove(&task)? {
+        s.status = Some(format!("Removed “{}”", task.text));
+    } else {
+        s.status = Some("The list changed on disk; reloaded".into());
+    }
+    s.todo_counts = day.counts();
+    let n = day.tasks().len();
+    s.picked = s.picked.min(n.saturating_sub(1));
+    Ok(())
+}
+
 /// Type the argument for quicklink `link`, or back to the launcher with `None`.
 fn enter_quicklink(s: &mut Tomboy, link: Option<usize>) {
     enter_submenu(s, None);
@@ -646,6 +761,12 @@ fn encode(q: &str) -> String {
 
 fn submit(s: &mut Tomboy, tx: &mut Tx) {
     if s.emoji.is_some() { copy_emoji(s, tx); return; }
+    if s.todo.is_some() && !s.query.text.trim().is_empty() {
+        // Typing in the list adds a todo; with the field empty, Enter toggles the picked one.
+        let text = s.query.text.clone();
+        if let Err(e) = add_todo(s, &text) { s.status = Some(format!("Failed: {e}")); }
+        return;
+    }
     if let Some(run) = s.chat.clone() {
         if run.lock().is_running() { return; }
         if s.query.text.trim().is_empty() {
@@ -676,6 +797,7 @@ fn on_input_key(s: &mut Tomboy, ev: &KeyEvent, tx: &mut Tx) -> bool {
         return true;
     }
     if s.emoji.is_some() { return emoji_key_event(s, ev, tx); }
+    if s.todo.is_some() && todo_key_event(s, ev, tx) { return true; }
     let n = results(s).len();
     match ev.key {
         Key::Down if n > 0 => s.picked = (s.picked + 1) % n,
@@ -720,11 +842,13 @@ fn view(s: &Tomboy, cx: &mut Cx<Tomboy>) -> El {
     let crumb = if s.chat.is_some() { None }
         else if s.clips.is_some() { Some("Clipboard History".to_string()) }
         else if s.emoji.is_some() { Some("Emoji & Symbols".to_string()) }
+        else if s.todo.is_some() { Some(format!("Today {}/{}", s.todo_counts.0, s.todo_counts.1)) }
         else if let Some(l) = s.quicklink { Some(s.links[l].name.clone()) }
         else { submenu_title(s) };
     let placeholder = if s.chat.is_some() { "Ask a follow-up…".to_string() }
         else if s.clips.is_some() { "Search clipboard…".to_string() }
         else if s.emoji.is_some() { "Search emoji and symbols…".to_string() }
+        else if s.todo.is_some() { "Add a todo…".to_string() }
         else if let Some(l) = s.quicklink { s.links[l].prompt() }
         else if let Some(c) = &crumb { format!("Search {}…", c.rsplit(" › ").next().unwrap_or(c)) }
         else { "Search apps, calculate, or paste a URL…".to_string() };
@@ -745,6 +869,7 @@ fn view(s: &Tomboy, cx: &mut Cx<Tomboy>) -> El {
         header = header.child(row().key("crumb").h(ty::px(28.0)).px(10.0).radius(7.0).center_y().fill(t.control_off)
             .child(text(c).font(ty::label()).color(t.text))
             .on_press(|s: &mut Tomboy| if s.emoji.is_some() { if !s.direct { leave_emoji(s) } }
+                else if s.todo.is_some() { if !s.direct { leave_todo(s) } }
                 else if s.clips.is_some() { if !s.direct { leave_clipboard(s) } }
                 else if s.quicklink.is_some() { enter_quicklink(s, None) }
                 else { leave_submenu(s) }));
@@ -755,6 +880,7 @@ fn view(s: &Tomboy, cx: &mut Cx<Tomboy>) -> El {
         Some(run) => chat_body(s, run, dark, &t),
         None if s.clips.is_some() => clipboard_body(s, &t, accent),
         None if s.emoji.is_some() => emoji_body(s, &t, accent),
+        None if s.todo.is_some() => todo_body(s, &t, accent),
         None => results_body(s, &t, accent),
     };
     let footer = row().h(ty::px(40.0)).px(16.0).gap(10.0).center_y().fill(t.bg)
@@ -784,6 +910,7 @@ fn results_body(s: &Tomboy, t: &tok::Theme, accent: Color) -> (El, String, (&'st
             Item::Clipboard | Item::Emoji => "Commands",
             Item::Clip(_) => "Clipboard",
             Item::Quicklink { .. } => "Quicklinks",
+            Item::Todo | Item::TodoAdd(_) => "Todo",
             Item::Answer(a) if a.kind == Kind::Process => "Processes",
             _ => "Results",
         };
@@ -810,6 +937,50 @@ fn results_body(s: &Tomboy, t: &tok::Theme, accent: Color) -> (El, String, (&'st
         (None, None) => format!("tomboy · {}", s.platform.name()),
     });
     (body, left, (action, "↵"))
+}
+
+/// Today's todo list: a checkbox per task; typing adds one.
+fn todo_body(s: &Tomboy, t: &tok::Theme, accent: Color) -> (El, String, (&'static str, &'static str)) {
+    let tasks = s.todo.as_ref().map(|d| d.tasks()).unwrap_or_default();
+    let mut list = col().key("results").w_full().padding(8.0);
+    for (i, task) in tasks.iter().enumerate() {
+        list = list.child(task_row(task, i, i == s.picked, t, accent));
+    }
+    if tasks.is_empty() {
+        list = list.child(col().h(120.0).w_full().center()
+            .child(text("Nothing on today's list. Type a todo and press Enter").font(ty::body()).color(t.text_secondary)));
+    }
+    let body = col().w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(list);
+    let (done, total) = s.todo_counts;
+    let left = s.status.clone().unwrap_or_else(|| {
+        let date = s.todo.as_ref().map(|d| d.date.strftime("%A %-d %B").to_string()).unwrap_or_default();
+        let count = if total > 0 && done == total { "All done 🎉".to_string() } else { format!("{done}/{total} done") };
+        format!("{count} · {date} · space toggles, del removes")
+    });
+    let action = if !s.query.text.trim().is_empty() { ("Add Todo", "↵") }
+        else { match tasks.get(s.picked) { Some(t) if t.done => ("Mark Open", "↵"), Some(_) => ("Mark Done", "↵"), None => ("", "↵") } };
+    (body, left, action)
+}
+
+fn task_row(task: &todo::Task, i: usize, on: bool, t: &tok::Theme, accent: Color) -> El {
+    let fg = match (on, task.done) {
+        (true, false) => Color::WHITE,
+        (true, true) => Color::WHITE.alpha(0.7),
+        (false, false) => t.text,
+        (false, true) => t.text_secondary,
+    };
+    // nf-md-checkbox_marked / checkbox_blank_outline
+    let (glyph, glyph_color) = if task.done { ("\u{f0132}", if on { Color::WHITE } else { accent }) }
+        else { ("\u{f0131}", fg) };
+    row().key(format!("item-{i}")).h(ty::px(40.0)).px(10.0).gap(10.0).radius(8.0).center_y()
+        .fill(if on { accent.alpha(0.85) } else { Color::TRANSPARENT })
+        .child(text(glyph).font(rune::TextStyle { size: ty::px(20.0), ..ty::body().lh(ty::px(22.0)).family(NERD_FONT) }).color(glyph_color))
+        .child(text(task.text.clone()).font(ty::body()).color(fg).truncate().grow(1.0).min_w(0.0))
+        .on_hover(move |s: &mut Tomboy| s.picked = i)
+        .on_press(move |s: &mut Tomboy| {
+            s.picked = i;
+            if let Err(e) = toggle_task(s, i) { s.status = Some(format!("Failed: {e}")); }
+        })
 }
 
 /// The clipboard history: the clips on the left, the picked one's full text or picture on
@@ -1007,6 +1178,16 @@ fn item_row(s: &Tomboy, item: &Item, i: usize, on: bool, t: &tok::Theme, accent:
             let clip = &s.clips.as_ref().expect("clips listed in clipboard mode")[*c];
             (glyph("⧉", accent), clip.title(), None, "Clip")
         }
+        Item::Todo => {
+            let (done, total) = s.todo_counts;
+            let sub = if total == 0 { "Nothing yet. Add some".to_string() }
+                else if done == total { "All done 🎉".to_string() } else { format!("{} left", total - done) };
+            (glyph_in("\u{f0134}", Color { r: 0.20, g: 0.65, b: 0.45, a: 1.0 }, Some(NERD_FONT)), // nf-md-checkbox_marked_circle_outline
+                format!("Today · {done}/{total} done"), Some(sub), "Todo")
+        }
+        Item::TodoAdd(text) => (glyph_in("\u{f0415}", Color { r: 0.20, g: 0.65, b: 0.45, a: 1.0 }, Some(NERD_FONT)), // nf-md-plus
+            format!("Add todo: {text}"), Some(format!("to today's list · {}/{} done", s.todo_counts.0, s.todo_counts.1)), "Todo"),
+        Item::Task(_) => (glyph("☐", accent), String::new(), None, "Task"), // drawn by `task_row`
         Item::Quicklink { link, arg } => {
             let l = &s.links[*link];
             let (title, sub) = match arg {
@@ -1106,6 +1287,18 @@ fn clipboard_scene(s: &mut Tomboy) {
     s.direct = true;
 }
 
+/// A day's list in memory (nothing written) for the headless `todo` scene.
+fn todo_scene(s: &mut Tomboy) {
+    let day = todo::Day::demo(jiff::civil::date(2026, 11, 12), &[
+        (true, "Reply to Jonas about the offsite"), (true, "Ship tomboy 0.2"), (false, "Review PR #42"),
+        (false, "Buy milk"), (false, "Book the dentist"), (true, "Pay the electricity bill"), (false, "Call mum"),
+    ]);
+    s.todo_counts = day.counts();
+    s.todo = Some(day);
+    s.picked = 2;
+    s.direct = true;
+}
+
 /// Quicklinks and an alias for the headless scenes, instead of the real config's.
 fn demo_links(s: &mut Tomboy) {
     s.links = vec![
@@ -1121,6 +1314,11 @@ fn main() {
     match args.first().map(String::as_str) {
         Some("clipboard-watch") => exit_on_error(clipboard::watch()),
         Some("clipboard-capture") => exit_on_error(clipboard::capture(args.get(1).map_or("text", String::as_str))),
+        Some("todo") if args.get(1).map(String::as_str) == Some("add") => {
+            let dir = config::load().0.todo_dir();
+            exit_on_error(dir.ok_or_else(|| std::io::Error::other("no home directory"))
+                .and_then(|d| todo::add_cli(&d, &args[2..].join(" "))))
+        }
         _ => {}
     }
     rune::set_app_id("tomboy");
@@ -1156,6 +1354,9 @@ fn main() {
             ("quicklink-command", |s| { demo_links(s); s.query = TextEdit::new("ji"); }),
             ("quicklink-arg", |s| { demo_links(s); s.quicklink = Some(1); }),
             ("alias", |s| { demo_links(s); s.query = TextEdit::new("bubu"); }),
+            ("todo", todo_scene),
+            ("todo-command", |s| { s.todo_counts = (3, 7); s.query = TextEdit::new("todo"); }),
+            ("todo-add", |s| { s.todo_counts = (3, 7); s.query = TextEdit::new("todo buy milk"); }),
         ],
         ..AppSpec::new("tomboy", (WIDTH, HEIGHT), init, view)
     };

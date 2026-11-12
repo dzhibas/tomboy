@@ -72,6 +72,8 @@ All OS commands live in `src/sys.rs` and `src/apps/{linux,macos}.rs` behind `#[c
   [Clipboard history](#clipboard-history).
 - **Emoji & symbols**: `tomboy emoji`, or type `emoji` in the launcher — see
   [Emoji & symbols](#emoji--symbols).
+- **Todos**: today's checklist, `tomboy todo`, or type `todo` (`todo buy milk` adds one) — see
+  [Todos](#todos).
 - **Quicklinks & aliases**: `jira ABC-1` opens your Jira ticket, `gh tomboy` a GitHub search;
   `bubu` opens Chromium. Set up in the config — see [Quicklinks & aliases](#quicklinks--aliases).
 - **Omarchy**: on Omarchy (detected via `$OMARCHY_PATH` or `/usr/share/omarchy`), every entry of the
@@ -127,6 +129,10 @@ jira = { url = "issues.jira.com/browse/{issue}", name = "Jira issue" }
 
 [aliases]
 bubu = "chromium"
+
+[todo]
+# Where the daily todo lists live. Default ~/Documents/tomboy/todo.
+directory = "~/notes/todo"
 ```
 
 | Setting | Default | What it does |
@@ -138,6 +144,7 @@ bubu = "chromium"
 | `ui.font_size` | `13` | Text size in points (9–24). The search field, titles, labels and agent answers scale with it and rows grow to fit; icons and the window size stay. |
 | `quicklinks.<keyword>` | none | A URL pattern opened by a keyword, see [Quicklinks & aliases](#quicklinks--aliases). |
 | `aliases.<word>` | none | Another word for an app, command or quicklink, see [Quicklinks & aliases](#quicklinks--aliases). |
+| `todo.directory` | `~/Documents/tomboy/todo` | Where the daily todo lists live, see [Todos](#todos). |
 
 A file that doesn't parse, or has an unknown key, is ignored as a whole; the footer says why
 (`config.toml ignored: unknown field …`).
@@ -164,6 +171,41 @@ and the agent writes `config.toml` for you and tells you it applies on the next 
 gets the skill as an appended system prompt (`--append-system-prompt`, with `--add-dir
 ~/.config/tomboy` so it may write there); opencode, codex and crush get it ahead of the prompt.
 When you add an option, document it in `src/skill.md` too.
+
+## Todos
+
+A checklist for the day. Open it with `tomboy todo` (bind it to a key), or type `todo` in the
+launcher; whenever today has tasks, the empty launcher shows **Today · 3/10 done** at the top.
+
+- **Add**: type and press Enter. From the launcher, `todo buy milk` (or `task …`) + Enter adds
+  without opening the list, so you can add a few in a row.
+- **Check off**: ↑/↓ and Enter (or Space), or click a task. Enter on a done task opens it again.
+- **Remove**: Delete.
+- Esc clears the field, then goes back (or closes, when opened as `tomboy todo`).
+
+Each day is a Markdown file in `~/Documents/tomboy/todo/` (`[todo] directory`), so any editor,
+Obsidian or the agent can read and change it; tomboy re-reads it on every change:
+
+```markdown
+# 2026-11-12
+
+- [x] Reply to Jonas
+- [ ] Review PR #42
+```
+
+Opening the list moves the open tasks from your last earlier list into today, and they're
+marked `- [>]` (moved) in the old file, so nothing is open in two places and old days keep
+their history.
+
+From a script or another keybinding: `tomboy todo add buy milk` (prints `3/11 done`).
+Or ask the agent: "add review PR 42 to my todos", "mark buy milk done", "what's left today?",
+"move the dentist to tomorrow".
+
+Bind it on Omarchy (`~/.config/hypr/bindings.lua`; Super+Alt+T is free there):
+
+```lua
+o.bind("SUPER + ALT + T", "Tomboy todo", "~/.cargo/bin/tomboy todo")
+```
 
 ## Quicklinks & aliases
 
@@ -320,6 +362,7 @@ On Omarchy, see [Install on Omarchy](#install-on-omarchy).
 | `src/clipboard.rs` | Clipboard history: reading, searching, copying back, recording |
 | `src/frecency.rs` | Launch history: frecency and learned queries for ranking |
 | `src/quicklinks.rs` | Quicklinks: keyword matching and URL expansion |
+| `src/todo.rs` | Daily todo lists: Markdown files, carry-over, add/toggle/remove |
 | `src/config.rs` | `~/.config/tomboy/config.toml`: loading and defaults |
 | `src/skill.md` | What the agent knows about tomboy's config (sent with every agent run) |
 | `src/sys.rs` | OS commands: open URL, clipboard, detached spawn |
@@ -341,6 +384,6 @@ CARGO_FEATURE_PURE=1 cargo check --target aarch64-apple-darwin
 ```sh
 cargo test
 cargo test live_claude -- --ignored   # runs the real claude CLI (tiny paid request)
-cargo run -- --snap shot.png --scene calc   # scenes: apps calc url web omarchy chat submenu units time dev kill currency quicklink quicklink-arg alias
+cargo run -- --snap shot.png --scene calc   # scenes: apps calc url web omarchy chat submenu units time dev kill currency quicklink quicklink-arg alias todo todo-command todo-add
 cargo run -- --tree tree.json --scene apps
 ```

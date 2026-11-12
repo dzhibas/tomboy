@@ -29,6 +29,10 @@
 //! [aliases]
 //! # Typing the alias puts the target's best match first.
 //! bubu = "chromium"
+//!
+//! [todo]
+//! # Where the daily todo lists (2026-11-12.md) live. Default ~/Documents/tomboy/todo.
+//! directory = "~/notes/todo"
 //! ```
 //!
 //! Every option is documented for the agent in `src/skill.md`; keep the two in step.
@@ -50,6 +54,14 @@ pub struct Config {
     pub quicklinks: BTreeMap<String, QuicklinkConfig>,
     /// What you type → what it stands for (`bubu = "chromium"`).
     pub aliases: BTreeMap<String, String>,
+    pub todo: TodoConfig,
+}
+
+#[derive(Debug, Default, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct TodoConfig {
+    /// Where the daily lists live; `~` expands to $HOME.
+    pub directory: Option<String>,
 }
 
 /// A `[quicklinks]` entry: just the URL, or a table with a display name.
@@ -120,6 +132,16 @@ impl Config {
     /// The configured model for `agent`, if any.
     pub fn agent_model(&self, agent: &str) -> Option<String> {
         self.agent.models.get(agent).map(|m| m.trim().to_string()).filter(|m| !m.is_empty())
+    }
+
+    /// Where the daily todo lists live: the configured folder, else ~/Documents/tomboy/todo.
+    /// (Created on the first write, so it needn't exist.)
+    pub fn todo_dir(&self) -> Option<PathBuf> {
+        let home = sys::home_dir()?;
+        Some(match self.todo.directory.as_deref().filter(|d| !d.trim().is_empty()) {
+            Some(d) => expand(d, &home),
+            None => home.join("Documents/tomboy/todo"),
+        })
     }
 
     /// Whether search learns from launches and ranks by them (default on).
@@ -250,6 +272,15 @@ mod tests {
         assert!(parse("[quicklinks]\n\"my link\" = \"x/{a}\"\n").0.warning().unwrap().contains("spaces"));
         assert!(parse("[quicklinks]\njira = \" \"\n").0.warning().unwrap().contains("no url"));
         assert!(parse("[aliases]\nbubu = \"\"\n").0.warning().unwrap().contains("empty"));
+    }
+
+    #[test]
+    fn todo_dir() {
+        let Some(home) = sys::home_dir() else { return };
+        assert_eq!(parse("").0.todo_dir(), Some(home.join("Documents/tomboy/todo")));
+        let (c, err) = parse("[todo]\ndirectory = \"~/notes/todo\"\n");
+        assert_eq!(err, None);
+        assert_eq!(c.todo_dir(), Some(home.join("notes/todo")));
     }
 
     #[test]

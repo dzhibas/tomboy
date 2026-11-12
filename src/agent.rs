@@ -187,10 +187,11 @@ impl Run {
             let t = self.lock();
             (t.agent.clone(), t.session.clone(), t.dir.clone(), t.model.clone())
         };
-        // tomboy's config and state directories (config.toml, frecency.json), created so the
-        // agent may write into them.
+        // tomboy's config, state and todo directories (config.toml, frecency.json, the daily
+        // lists), created so the agent may write into them.
         let extra_dirs: Vec<PathBuf> = [config::path().and_then(|p| p.parent().map(PathBuf::from)),
-                                        sys::state_dir().map(|d| d.join("tomboy"))]
+                                        sys::state_dir().map(|d| d.join("tomboy")),
+                                        config::load().0.todo_dir()]
             .into_iter().flatten().filter(|d| std::fs::create_dir_all(d).is_ok()).collect();
         let argv = headless_argv(&agent, prompt, session.as_deref(), &extra_dirs, model.as_deref())
             .ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, format!("{agent} has no headless mode")))?;

@@ -9,7 +9,8 @@ window as Markdown: keep it short.
 
 When the user asks to change how tomboy behaves ("change the working directory to ~/sites",
 "run the agent in my projects folder", "use codex instead", "use haiku", "make the text bigger", "font size 16", "add a quicklink
-jira for …", "alias bubu to chromium", "what can I configure in tomboy?"), edit tomboy's config file. Do not edit tomboy's source code for this.
+jira for …", "alias bubu to chromium", "keep my todos in ~/notes", "what can I configure in
+tomboy?"), edit tomboy's config file. Do not edit tomboy's source code for this.
 
 - **File**: `~/.config/tomboy/config.toml` (`$XDG_CONFIG_HOME/tomboy/config.toml` when that is set).
   It is optional: create it, and the `~/.config/tomboy/` directory, when missing.
@@ -134,6 +135,12 @@ ghs = "gh tomboy"
 - "Remove the bubu alias" → delete its line. An alias for a keyword that's also a quicklink
   keyword: the quicklink row still shows, below the alias's pick.
 
+### `[todo]`
+
+| Key | Type | Default | What it does |
+| --- | --- | --- | --- |
+| `directory` | string (path) | `~/Documents/tomboy/todo` | Where the daily todo lists live (see "Todos" below). `~` is home. Created when the first todo is added. Changing it doesn't move existing lists: offer to move the `.md` files if the user wants them along. |
+
 Example:
 
 ```toml
@@ -157,7 +164,45 @@ jira = { url = "https://issues.jira.com/browse/{issue}", name = "Jira issue" }
 
 [aliases]
 bubu = "chromium"
+
+[todo]
+directory = "~/notes/todo"
 ```
+
+## Todos
+
+tomboy keeps a todo list per day as Markdown, one file per day in the `[todo] directory`
+(default `~/Documents/tomboy/todo/`), named `YYYY-MM-DD.md` in local time:
+
+```markdown
+# 2026-11-12
+
+- [x] Reply to Jonas
+- [ ] Review PR #42
+```
+
+- `- [ ] text` is open, `- [x] text` done, `- [>] text` moved to a later day. Other lines
+  (headings, notes) are the user's: keep them.
+- Whenever tomboy opens the list, it moves the latest earlier day's open tasks into today
+  (marking them `[>]` there). So today may not have a file yet, and open tasks may still sit
+  in the latest earlier file: count those as today's when answering "what's left?". To add to
+  today, create the file with its `# YYYY-MM-DD` heading if it's missing; don't move earlier
+  tasks yourself, tomboy does that.
+- Get today's date with `date +%F`.
+
+What to do:
+
+- "add buy milk to my todos", "remind me to call mum today": append `- [ ] Buy milk` after
+  the last task in today's file. One task per line, short, in the user's words.
+- "mark buy milk done", "I called mum": change that task's `[ ]` to `[x]`. Match loosely; if
+  several fit, ask.
+- "what's left today?", "what's on my list?": list the open tasks, and the count (`3/7 done`).
+- "move the dentist to tomorrow": mark it `[>]` today and add it as `- [ ]` to tomorrow's file
+  (create it with its heading). Any date works the same way ("on friday", "next monday").
+- "remove …": delete that line.
+
+Reply in one line. tomboy re-reads the file on every change, so edits apply at once, even
+while its list is open.
 
 ## Search ranking (usage history)
 
