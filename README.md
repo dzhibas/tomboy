@@ -13,6 +13,8 @@ All OS commands live in `src/sys.rs` and `src/apps/{linux,macos}.rs` behind `#[c
 
 - **Apps**: type to fuzzy-search installed `.desktop` applications; Enter launches (via `uwsm app --` when available).
 - **Calculator**: `2+2`, `(2+2)*10/3`, `sqrt(16)`, `2^10`, `sin(pi/2)` — Enter copies the answer (`wl-copy`).
+  Percentages work like a phone calculator: `15% of 200` = 30, `15% off 200` = 170,
+  `200 + 15%` = 230, `200 - 15%` = 170; `10 % 3` is still modulo.
 - **URLs**: `github.com/anomalyco/rune`, `https://…`, `localhost:3000` — Enter opens the browser (`xdg-open`).
 - **Answers** (`src/answers/`) — Enter copies the answer:
 
@@ -20,6 +22,8 @@ All OS commands live in `src/sys.rs` and `src/apps/{linux,macos}.rs` behind `#[c
   | --- | --- |
   | `100 km to miles`, `20 c to f`, `1 tb to gib`, `2 cup to ml` | `62.1371 mi` — length, mass, volume, temperature, data (decimal and binary), speed, time, area |
   | `123 eur to usd`, `$120 to eur`, `50 euros to dollars`, `eur to usd` | `143.31 USD` — 166 currencies; rates from open.er-api.com, fetched on the first conversion typed, cached a day in `~/.cache/tomboy/` |
+  | `days until 25 dec`, `days since 1 jan 2020`, `weeks until christmas` | `43 days` · `Friday, 25 December 2026` — a date without a year is its next occurrence (its last one after `since`) |
+  | `monday in 3 weeks`, `in 3 weeks`, `3 days ago`, `today + 10 days`, `2 weeks after christmas`, `next friday` | `Monday, 30 November 2026` · `2026-11-30 · in 18 days` — a weekday with an offset is that day in the week the offset lands in |
   | `time in tokyo`, `now in utc`, `pst time` | `18:13` · `Asia/Tokyo · 6 hours ahead` — any city in the tz database, plus abbreviations |
   | `uuid`, `password 24`, `sha256 x`, `base64 x`, `b64d x`, `urlencode x`, `urldecode x`, `epoch`, `epoch 1787875351` | developer utilities; random values come from `/dev/urandom` and hold still until the next launch |
   | `kill chromium` | matching processes with pid, CPU and memory — Enter sends SIGTERM |
@@ -158,7 +162,7 @@ For the clipboard history key, see [Bind it to a key in Hyprland](#bind-it-to-a-
 | `src/apps/macos.rs` | `.app` bundle scanning and launching |
 | `src/dictation.rs` | Detecting Superwhisper dictation |
 | `src/agent.rs` | Handing a prompt to the coding agent |
-| `src/answers/` | Units, currency, time zones, developer utilities, kill process |
+| `src/answers/` | Units, currency, date math, time zones, developer utilities, kill process |
 | `src/clipboard.rs` | Clipboard history: reading, searching, copying back, recording |
 | `src/config.rs` | `~/.config/tomboy/config.toml`: loading and defaults |
 | `src/skill.md` | What the agent knows about tomboy's config (sent with every agent run) |

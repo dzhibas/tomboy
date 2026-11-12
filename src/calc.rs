@@ -1,5 +1,9 @@
 //! Tiny calculator for the launcher: a recursive-descent expression evaluator.
 //!
+//! Percentages work as on a phone calculator: `15% of 200` = 30, `15% off 200` = 170,
+//! `200 + 15%` = 230, `200 - 15%` = 170, `200 * 15%` = 30. A `%` followed by a number, `(` or
+//! a name is still modulo (`10 % 3` = 1).
+//!
 //! `eval` returns `None` for anything that is not clearly a math expression
 //! (plain numbers, plain constants, unknown words, parse errors, NaN/inf).
 
@@ -14,6 +18,12 @@ enum Tok {
     Mul,
     Div,
     Mod,
+    /// Postfix `%`: divides by 100, and makes `+`/`-` work relative to the left side.
+    Percent,
+    /// `of` in `15% of 200`.
+    Of,
+    /// `off` in `15% off 200`.
+    Off,
     Pow,
     LParen,
     RParen,
@@ -56,6 +66,10 @@ fn tokenize(s: &str) -> Option<Vec<Tok>> {
                 }
                 if word == "x" {
                     toks.push(Tok::Mul);
+                } else if word == "of" {
+                    toks.push(Tok::Of);
+                } else if word == "off" {
+                    toks.push(Tok::Off);
                 } else {
                     if !is_known(&word) {
                         return None;
@@ -78,7 +92,8 @@ fn tokenize(s: &str) -> Option<Vec<Tok>> {
                     '-' | '−' => Tok::Minus,
                     '×' | '·' => Tok::Mul,
                     '/' | '÷' => Tok::Div,
-                    '%' => Tok::Mod,
+                    '%' if is_modulo(&chars[i + 1..]) => Tok::Mod,
+                    '%' => Tok::Percent,
                     '^' => Tok::Pow,
                     '(' => Tok::LParen,
                     ')' => Tok::RParen,
@@ -91,6 +106,19 @@ fn tokenize(s: &str) -> Option<Vec<Tok>> {
         }
     }
     Some(toks)
+}
+
+/// Is the `%` before `rest` modulo? Yes when an operand follows it (`10 % 3`, `7 % (2+1)`,
+/// `10 % pi`); no for `15%`, `15% of 200`, `15%)`, `200 + 15% + 1`.
+fn is_modulo(rest: &[char]) -> bool {
+    let rest: String = rest.iter().collect();
+    let rest = rest.trim_start();
+    let word: String = rest.chars().take_while(|c| c.is_ascii_alphabetic()).collect::<String>().to_ascii_lowercase();
+    match rest.chars().next() {
+        Some(c) if c.is_ascii_digit() || c == '.' || c == '(' => true,
+        Some(c) if c.is_ascii_alphabetic() => word != "of" && word != "off",
+        _ => false,
+    }
 }
 
 const FUNCS: &[&str] = &[
@@ -139,14 +167,21 @@ impl Parser {
         }
     }
 
-    // expr := term (('+'|'-') term)*
+    /// Did the operand just parsed end in a postfix `%`? (`15%` yes, `(50%)` no.)
+    fn ended_in_percent(&self) -> bool {
+        self.pos > 0 && self.toks.get(self.pos - 1) == Some(&Tok::Percent)
+    }
+
+    // expr := term (('+'|'-') term)*      a percent term adds/subtracts that share of the left
     fn expr(&mut self) -> Option<f64> {
-        let mut v = self.term()?;
+        let (mut v, _) = self.term()?;
         loop {
             if self.eat(&Tok::Plus) {
-                v += self.term()?;
+                let (b, pct) = self.term()?;
+                v = if pct { v * (1.0 + b) } else { v + b };
             } else if self.eat(&Tok::Minus) {
-                v -= self.term()?;
+                let (b, pct) = self.term()?;
+                v = if pct { v * (1.0 - b) } else { v - b };
             } else {
                 break;
             }
@@ -155,11 +190,21 @@ impl Parser {
         Some(v)
     }
 
-    // term := unary (('*'|'/'|'%') unary | <implicit> power)*
-    fn term(&mut self) -> Option<f64> {
+    // term := unary (('*'|'/'|'%') unary | <implicit> power | ('of'|'off') unary)*
+    // Returns the value and whether it is a lone percentage (`15%`), for `expr`.
+    fn term(&mut self) -> Option<(f64, bool)> {
         let mut v = self.unary()?;
+        let mut pct = self.ended_in_percent();
         loop {
             match self.peek() {
+                Some(Tok::Of) if pct => {
+                    self.pos += 1;
+                    v *= self.unary()?;
+                }
+                Some(Tok::Off) if pct => {
+                    self.pos += 1;
+                    v = self.unary()? * (1.0 - v);
+                }
                 Some(Tok::Mul) => {
                     self.pos += 1;
                     v *= self.unary()?;
@@ -178,8 +223,9 @@ impl Parser {
                 _ => break,
             }
             self.did_op = true;
+            pct = false;
         }
-        Some(v)
+        Some((v, pct))
     }
 
     // unary := ('-'|'+') unary | power
@@ -193,16 +239,21 @@ impl Parser {
         }
     }
 
-    // power := primary ('^' unary)?   (right-associative; -2^2 == -4)
+    // power := primary ('^' unary)? '%'?   (right-associative; -2^2 == -4)
     fn power(&mut self) -> Option<f64> {
         let base = self.primary()?;
-        if self.eat(&Tok::Pow) {
+        let v = if self.eat(&Tok::Pow) {
             self.did_op = true;
             let exp = self.unary()?;
-            Some(base.powf(exp))
+            base.powf(exp)
         } else {
-            Some(base)
+            base
+        };
+        if self.eat(&Tok::Percent) {
+            self.did_op = true;
+            return Some(v / 100.0);
         }
+        Some(v)
     }
 
     fn primary(&mut self) -> Option<f64> {
@@ -404,11 +455,29 @@ mod tests {
     }
 
     #[test]
+    fn percentages() {
+        assert!(close(ev("15% of 200"), 30.0));
+        assert!(close(ev("15 % OF 200"), 30.0));
+        assert!(close(ev("15% off 200"), 170.0));
+        assert!(close(ev("200 + 15%"), 230.0));
+        assert!(close(ev("200 - 15%"), 170.0));
+        assert!(close(ev("200 * 15%"), 30.0));
+        assert!(close(ev("200 + 10% + 10%"), 242.0));
+        assert!(close(ev("(50%) * 4"), 2.0));
+        assert!(close(ev("15%"), 0.15));
+        assert!(close(ev("(10+5)% of (100+100)"), 30.0));
+        // `%` before an operand is still modulo.
+        assert!(close(ev("10 % 3"), 1.0));
+        assert!(close(ev("10%3"), 1.0));
+        assert!(close(ev("7 % (2+1)"), 1.0));
+    }
+
+    #[test]
     fn rejects() {
         for s in [
             "", "2", "-2", "pi", "-pi", "(2)", "firefox", "term", "1,000", "2 +", "(2+3",
             "1/0", "0/0", "5 % 0", "sqrt(-1)", "2 3", "foo(2)", "sqrt 4", "1,2", "1__0+1",
-            "1_+1", "hello world", "x",
+            "1_+1", "hello world", "x", "%", "of", "15 of 200", "200 off", "15% of", "of 200",
         ] {
             assert_eq!(eval(s), None, "{s:?}");
         }

@@ -1,5 +1,5 @@
 //! What every answer provider returns. Providers live beside this file (`units.rs`,
-//! `timezone.rs`, `devtools.rs`, `kill.rs`, `currency.rs`) and use these types as
+//! `dates.rs`, `timezone.rs`, `devtools.rs`, `kill.rs`, `currency.rs`) and use these types as
 //! `super::{Answer, Action, Kind, Wake}`.
 
 use std::sync::Arc;
@@ -16,6 +16,7 @@ pub enum Kind {
     Dev,
     Process,
     Currency,
+    Date,
 }
 
 /// What Enter does on an answer row.

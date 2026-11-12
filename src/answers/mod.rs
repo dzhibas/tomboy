@@ -1,12 +1,13 @@
 //! Answers: queries that come back with a result at the head of the list instead of only
-//! filtering — unit and currency conversion, time zones, developer utilities and killing
-//! processes. Each feature is one file with an `answer`/`answers` function returning
+//! filtering — unit and currency conversion, date math, time zones, developer utilities and
+//! killing processes. Each feature is one file with an `answer`/`answers` function returning
 //! [`Answer`]s; the calculator stays in `crate::calc`.
 
 mod types;
 pub use types::*;
 
 pub mod currency;
+pub mod dates;
 pub mod devtools;
 pub mod kill;
 pub mod timezone;
@@ -23,6 +24,7 @@ pub fn collect(query: &str, seed: &[u8; 32], wake: &Wake) -> Vec<Answer> {
     out.extend(devtools::answer(query, seed));
     out.extend(units::answer(query));
     out.extend(currency::answer(query, wake));
+    out.extend(dates::answer(query));
     out.extend(timezone::answer(query));
     out.extend(kill::answers(query, MAX_PROCESSES));
     out

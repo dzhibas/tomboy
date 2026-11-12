@@ -742,6 +742,7 @@ fn answer_style(kind: Kind) -> (&'static str, Color, &'static str) {
         Kind::Time => ("\u{f017}", rgb(0.35, 0.50, 0.95), "Time"),             // nf-fa-clock_o
         Kind::Dev => ("\u{f121}", rgb(0.55, 0.40, 0.85), "Developer"),         // nf-fa-code
         Kind::Process => ("\u{f068c}", rgb(0.85, 0.30, 0.30), "Process"),      // nf-md-skull
+        Kind::Date => ("\u{f00ed}", rgb(0.15, 0.60, 0.60), "Date"),          // nf-md-calendar
     }
 }
 
@@ -800,6 +801,9 @@ fn main() {
             ("currency", |s| s.query = TextEdit::new("123 eur to usd")),
             ("clipboard-command", |s| s.query = TextEdit::new("clip")),
             ("clipboard", clipboard_scene),
+            ("date", |s| s.query = TextEdit::new("days until 25 dec")),
+            ("date-offset", |s| s.query = TextEdit::new("monday in 3 weeks")),
+            ("percent", |s| s.query = TextEdit::new("15% of 200")),
         ],
         ..AppSpec::new("tomboy", (WIDTH, HEIGHT), init, view)
     };
