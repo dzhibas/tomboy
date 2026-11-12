@@ -34,14 +34,50 @@ Tested on Omarchy 4.5.
 Optional: bind the emoji picker too, see [Emoji & symbols](#emoji--symbols), and set things up
 in [Configuration](#configuration) (or just ask the agent: "make the font bigger").
 
+## Install on macOS
+
+On a Mac tomboy runs in the background like Raycast: no Dock icon, a hotkey brings the window
+up instantly, and it records your clipboard history.
+
+1. **Install Rust** (`curl https://sh.rustup.rs -sSf | sh`) and the icon font
+   (`brew install --cask font-jetbrains-mono-nerd-font`).
+2. **Install tomboy**: `cargo install --git https://github.com/dzhibas/tomboy`
+3. **Start it at login**: `tomboy install-launch-agent`. This writes
+   `~/Library/LaunchAgents/io.github.dzhibas.tomboy.plist`, which runs `tomboy daemon` now, at
+   every login and again if it crashes, with your shell's `PATH` (so `claude` is found). Run it
+   again after updating tomboy or changing `[hotkeys]` to restart the daemon;
+   `tomboy uninstall-launch-agent` removes it. Log: `~/Library/Logs/tomboy.log`.
+4. **Use it**:
+
+   | Hotkey | Opens |
+   | --- | --- |
+   | ⌥Space | the launcher |
+   | ⌃⌥V | clipboard history |
+   | ⌃⌥E | emoji & symbols |
+   | ⌃⌥T | today's todos |
+
+   Change them under [`[hotkeys]`](#configuration). To use ⌘Space, first turn off Spotlight's
+   shortcut (System Settings › Keyboard › Keyboard Shortcuts › Spotlight), or Raycast's. The
+   same hotkey again, Esc or a click elsewhere hides the window.
+5. **Allow pasting** (optional): picking a clip or an emoji copies it and pastes it into the
+   app you were in, as Raycast does. That needs System Settings › Privacy & Security ›
+   Accessibility; macOS asks the first time. Until then picks are only copied. Rebuilding
+   tomboy may need the permission granted again. Turn it off with `[clipboard] paste = false`.
+
+Type `lock`, `sleep`, `restart`, `empty trash`, `dark mode`, `mute` or `eject` for macOS's
+system commands; `quit tomboy` stops the daemon until the next login (or
+`tomboy install-launch-agent`). Plain `tomboy`, `tomboy clipboard` and so on still open a
+one-off window, as on Linux.
+
 | | Linux | macOS |
 | --- | --- | --- |
 | Apps | XDG `.desktop` entries, launched (via `uwsm app --` if present) | `.app` bundles in `/Applications`, `~/Applications`, `/System/Applications`…, launched with `open` |
 | URLs | `xdg-open` | `open` |
-| Copy | `wl-copy` (Wayland), `xclip`/`xsel` (X11) | `pbcopy` |
-| Platform menu | Omarchy menu when detected | — |
+| Copy | `wl-copy` (Wayland), `xclip`/`xsel` (X11) | `pbcopy`; images and files through AppKit's pasteboard |
+| Platform menu | Omarchy menu when detected | System commands (lock, sleep, restart, empty Trash, dark mode…) |
+| Hotkeys | your compositor's bindings run `tomboy` | `tomboy daemon` registers `[hotkeys]` itself |
 
-All OS commands live in `src/sys.rs` and `src/apps/{linux,macos}.rs` behind `#[cfg(target_os)]`.
+All OS commands live in `src/sys.rs`, `src/apps/{linux,macos}.rs` and `src/mac/` behind `#[cfg(target_os)]`.
 
 - **Apps**: type to fuzzy-search installed `.desktop` applications; Enter launches (via `uwsm app --` when available).
 - **Ranking learns from you (frecency)**: every app or Omarchy command you launch is remembered
@@ -133,6 +169,15 @@ bubu = "chromium"
 [todo]
 # Where the daily todo lists live. Default ~/Documents/tomboy/todo.
 directory = "~/notes/todo"
+
+[hotkeys]
+# macOS (`tomboy daemon`): global shortcuts; "" turns one off.
+launcher = "cmd+space"
+todo = ""
+
+[clipboard]
+# macOS: picking a clip or emoji also pastes it into the app in front. Default true.
+paste = false
 ```
 
 | Setting | Default | What it does |
@@ -145,6 +190,8 @@ directory = "~/notes/todo"
 | `quicklinks.<keyword>` | none | A URL pattern opened by a keyword, see [Quicklinks & aliases](#quicklinks--aliases). |
 | `aliases.<word>` | none | Another word for an app, command or quicklink, see [Quicklinks & aliases](#quicklinks--aliases). |
 | `todo.directory` | `~/Documents/tomboy/todo` | Where the daily todo lists live, see [Todos](#todos). |
+| `hotkeys.launcher` / `clipboard` / `emoji` / `todo` | `alt+space` / `ctrl+alt+v` / `ctrl+alt+e` / `ctrl+alt+t` | macOS only: the daemon's global shortcuts (`cmd`, `ctrl`, `alt`, `shift` + a key). `""` turns one off. Read when the daemon starts: run `tomboy install-launch-agent` again to apply. |
+| `clipboard.paste` | `true` | macOS only: after a clip or emoji is picked, paste it into the app in front (needs the Accessibility permission). `false` only copies. |
 
 A file that doesn't parse, or has an unknown key, is ignored as a whole; the footer says why
 (`config.toml ignored: unknown field …`).
@@ -260,7 +307,8 @@ A Raycast-style picker: a grid of big emoji, searchable, with your recent picks 
   keys like ⌘ ⌥ ⇧, Greek letters, check marks).
 - **Move**: ←/→/↑/↓ move through the grid, Tab / Shift+Tab jump between sections, hover picks.
   The footer shows the picked one's name.
-- **Use it**: Enter (or click) copies it and closes tomboy; paste with Ctrl+V. Picks feed
+- **Use it**: Enter (or click) copies it and closes tomboy; paste with Ctrl+V (on macOS the
+  daemon pastes it for you, see [Install on macOS](#install-on-macos)). Picks feed
   Recently Used and rank higher next time (frecency; off with `[search] frecency = false`).
 - **Esc** clears the search, then closes (or returns to the launcher).
 
@@ -292,7 +340,7 @@ A Raycast-style clipboard manager: everything you copied, newest first, with a f
   (selectable), images and copied image files as pictures, with its size in the footer
   (`Text · 3 lines · 45 characters`, `Image · PNG · 1920×1080`).
 - **Use it**: Enter (or click) puts the clip back on the clipboard and closes tomboy, so you
-  can paste it with Ctrl+V. Text goes back as text, images as images, copied files as files
+  can paste it with Ctrl+V (the macOS daemon pastes it for you). Text goes back as text, images as images, copied files as files
   (`text/uri-list`), so a file manager pastes the files themselves.
 - **Esc** clears the search, then closes (or returns to the launcher if you came from there).
 
@@ -302,7 +350,7 @@ A Raycast-style clipboard manager: everything you copied, newest first, with a f
 | --- | --- | --- |
 | Omarchy | `~/.local/state/omarchy/clipboard-history.json` | Omarchy's shell, already running; nothing to set up |
 | Other Wayland | `~/.local/state/tomboy/clipboard-history.json` | `tomboy clipboard-watch` (runs `wl-paste --watch`; needs `wl-clipboard`) |
-| macOS | `~/.local/state/tomboy/clipboard-history.json` | `tomboy clipboard-watch` (polls `pbpaste`, text only) |
+| macOS | `~/.local/state/tomboy/clipboard-history.json` | `tomboy daemon` (or `tomboy clipboard-watch`): watches the pasteboard for text, images and copied files; skips copies password managers mark private |
 
 `tomboy clipboard-watch` keeps the last 100 clips, moves a repeated copy to the top instead of
 duplicating it, saves images under `~/.local/state/tomboy/clipboard-images/`, and skips copies
@@ -370,15 +418,24 @@ On Omarchy, see [Install on Omarchy](#install-on-omarchy).
 | `src/sys.rs` | OS commands: open URL, clipboard, detached spawn |
 | `src/calc.rs` | Expression evaluator |
 | `src/url.rs` | URL detection and opening |
-| `src/platform.rs` | Platform detection (Omarchy / generic Linux) |
+| `src/platform.rs` | Platform detection (Omarchy / generic Linux / macOS) |
+| `src/mac/` | macOS: native pasteboard, paste into the front app, LaunchAgent, system commands |
 | `src/omarchy.rs` | Omarchy menu loading (JSONC), conditions, search, running |
 
 Type-check the macOS build from Linux (blake3's C code needs the macOS SDK, so use its pure-Rust path).
-This currently stops at `ring` (ureq's TLS), whose C code also needs the SDK; build on a Mac for a full check:
+This currently stops at `ring` (ureq's TLS), whose C code also needs the SDK; build on a Mac for a full check.
+The other way round, from a Mac, `ring` needs a C compiler for Linux: `clang` with stub `assert.h`
+and `string.h` in a folder on `-I` is enough for `cargo check`:
 
 ```sh
 rustup target add aarch64-apple-darwin
 CARGO_FEATURE_PURE=1 cargo check --target aarch64-apple-darwin
+
+# from a Mac:
+rustup target add x86_64-unknown-linux-gnu
+CC_x86_64_unknown_linux_gnu=clang AR_x86_64_unknown_linux_gnu=ar \
+  CFLAGS_x86_64_unknown_linux_gnu="--target=x86_64-unknown-linux-gnu -ffreestanding -I$STUBS" \
+  cargo check --target x86_64-unknown-linux-gnu --all-targets
 ```
 
 ## Headless checks
@@ -386,6 +443,6 @@ CARGO_FEATURE_PURE=1 cargo check --target aarch64-apple-darwin
 ```sh
 cargo test
 cargo test live_claude -- --ignored   # runs the real claude CLI (tiny paid request)
-cargo run -- --snap shot.png --scene calc   # scenes: apps calc url web omarchy chat submenu units time dev kill currency quicklink quicklink-arg alias todo todo-command todo-add
+cargo run -- --snap shot.png --scene calc   # scenes: apps calc url web omarchy system chat submenu units time dev kill currency quicklink quicklink-arg alias todo todo-command todo-add
 cargo run -- --tree tree.json --scene apps
 ```

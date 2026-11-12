@@ -33,6 +33,15 @@
 //! [todo]
 //! # Where the daily todo lists (2026-11-12.md) live. Default ~/Documents/tomboy/todo.
 //! directory = "~/notes/todo"
+//!
+//! [hotkeys]
+//! # macOS (`tomboy daemon`): global shortcuts; "" turns one off. Defaults below.
+//! launcher = "alt+space"
+//! clipboard = "ctrl+alt+v"
+//!
+//! [clipboard]
+//! # macOS: Enter on a clip or emoji also pastes it into the app in front. Default true.
+//! paste = false
 //! ```
 //!
 //! Every option is documented for the agent in `src/skill.md`; keep the two in step.
@@ -55,6 +64,38 @@ pub struct Config {
     /// What you type → what it stands for (`bubu = "chromium"`).
     pub aliases: BTreeMap<String, String>,
     pub todo: TodoConfig,
+    pub hotkeys: HotkeysConfig,
+    pub clipboard: ClipboardConfig,
+}
+
+/// Global shortcuts for the resident launcher (`tomboy daemon`, macOS). Unset is the
+/// default chord; `""` registers none.
+#[derive(Debug, Default, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct HotkeysConfig {
+    pub launcher: Option<String>,
+    pub clipboard: Option<String>,
+    pub emoji: Option<String>,
+    pub todo: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ClipboardConfig {
+    /// After picking a clip or emoji, paste it into the app in front (macOS daemon); default on.
+    pub paste: Option<bool>,
+}
+
+/// What each `tomboy daemon` shortcut opens, with its default chord.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Hotkey { Launcher, Clipboard, Emoji, Todo }
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // the daemon is macOS-only
+impl Hotkey {
+    pub const ALL: [Hotkey; 4] = [Hotkey::Launcher, Hotkey::Clipboard, Hotkey::Emoji, Hotkey::Todo];
+    pub fn default_chord(self) -> &'static str {
+        match self { Hotkey::Launcher => "alt+space", Hotkey::Clipboard => "ctrl+alt+v", Hotkey::Emoji => "ctrl+alt+e", Hotkey::Todo => "ctrl+alt+t" }
+    }
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
@@ -142,6 +183,20 @@ impl Config {
             Some(d) => expand(d, &home),
             None => home.join("Documents/tomboy/todo"),
         })
+    }
+
+    /// The chord for `hotkey`, or `None` when it's turned off (`""`).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn hotkey(&self, hotkey: Hotkey) -> Option<String> {
+        let h = &self.hotkeys;
+        let set = match hotkey { Hotkey::Launcher => &h.launcher, Hotkey::Clipboard => &h.clipboard, Hotkey::Emoji => &h.emoji, Hotkey::Todo => &h.todo };
+        let chord = set.as_deref().unwrap_or(hotkey.default_chord()).trim();
+        (!chord.is_empty()).then(|| chord.to_string())
+    }
+
+    /// Whether a picked clip or emoji is pasted into the front app too (default on).
+    pub fn paste(&self) -> bool {
+        self.clipboard.paste.unwrap_or(true)
     }
 
     /// Whether search learns from launches and ranks by them (default on).
@@ -243,6 +298,19 @@ mod tests {
         let (c, err) = parse("[search]\nfrecency = false\n");
         assert_eq!(err, None);
         assert!(!c.frecency());
+    }
+
+    #[test]
+    fn hotkeys_and_paste() {
+        let c = parse("").0;
+        assert_eq!(c.hotkey(Hotkey::Launcher).as_deref(), Some("alt+space"));
+        assert!(c.paste());
+        let (c, err) = parse("[hotkeys]\nlauncher = \"cmd+space\"\nemoji = \"\"\n\n[clipboard]\npaste = false\n");
+        assert_eq!(err, None);
+        assert_eq!(c.hotkey(Hotkey::Launcher).as_deref(), Some("cmd+space"));
+        assert_eq!(c.hotkey(Hotkey::Emoji), None);
+        assert_eq!(c.hotkey(Hotkey::Clipboard).as_deref(), Some("ctrl+alt+v"));
+        assert!(!c.paste());
     }
 
     #[test]

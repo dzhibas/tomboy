@@ -66,16 +66,22 @@ fn clipboard_helpers(_mime: Option<&str>) -> Vec<Vec<String>> {
     vec![vec!["pbcopy".into()]]
 }
 
-/// `pbcopy` only takes text; an image goes through AppleScript from a temporary file.
+/// `pbcopy` only takes text; an image goes on the pasteboard through AppKit.
 #[cfg(target_os = "macos")]
 fn copy_image_macos(bytes: &[u8], mime: &str) -> io::Result<bool> {
-    let class = match mime { "image/png" => "PNGf", "image/jpeg" => "JPEG", "image/gif" => "GIFf", _ => "TIFF" };
-    let file = std::env::temp_dir().join(format!("tomboy-clip-{}", std::process::id()));
-    std::fs::write(&file, bytes)?;
-    let script = format!("set the clipboard to (read (POSIX file \"{}\") as «class {class}»)", file.display());
-    let status = Command::new("osascript").args(["-e", &script]).status();
-    let _ = std::fs::remove_file(&file);
-    status.map(|s| s.success())
+    Ok(crate::mac::pasteboard::write_image(bytes, mime))
+}
+
+/// Put copied files back on the clipboard, given as a `text/uri-list` (`file:///…` lines), so
+/// a file manager pastes the files themselves.
+pub fn copy_files(uri_list: &str) -> io::Result<bool> {
+    #[cfg(target_os = "linux")]
+    return copy_bytes(uri_list.as_bytes(), Some("text/uri-list"));
+    #[cfg(target_os = "macos")]
+    {
+        let urls: Vec<String> = uri_list.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect();
+        Ok(crate::mac::pasteboard::write_files(&urls))
+    }
 }
 
 /// Run `argv` in a new terminal window, starting in $HOME.

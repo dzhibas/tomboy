@@ -110,7 +110,7 @@ impl Clip {
     /// file manager pastes the files; images go back as their own type.
     pub fn copy(&self) -> io::Result<bool> {
         match self {
-            Clip::Text(t) if !file_paths(t).is_empty() => sys::copy_bytes(t.as_bytes(), Some("text/uri-list")),
+            Clip::Text(t) if !file_paths(t).is_empty() => sys::copy_files(t),
             Clip::Text(t) => sys::copy_to_clipboard(t),
             Clip::Image { mime, path, .. } => sys::copy_bytes(&std::fs::read(path)?, Some(mime)),
         }
@@ -232,7 +232,8 @@ fn save(path: &Path, history: &[Clip]) -> io::Result<()> {
 
 /// Record copies into tomboy's history until killed. On Linux this runs `wl-paste --watch`,
 /// which calls `tomboy clipboard-capture <mime>` with each copy on stdin; on macOS it polls
-/// `pbpaste`.
+/// the pasteboard's change count (text, pictures and copied files; copies a password manager
+/// marks private are skipped). `tomboy daemon` runs it on a thread.
 pub fn watch() -> io::Result<()> {
     #[cfg(target_os = "linux")]
     {
@@ -251,14 +252,22 @@ pub fn watch() -> io::Result<()> {
     }
     #[cfg(target_os = "macos")]
     {
-        let mut last = None;
+        use crate::mac::pasteboard::{self, Copied};
+        // What's on the pasteboard at start was copied before; record from the next copy on.
+        let mut seen = pasteboard::change_count();
         loop {
-            let out = std::process::Command::new("pbpaste").output()?;
-            if out.status.success() && !out.stdout.is_empty() && last.as_ref() != Some(&out.stdout) {
-                if last.is_some() { record(&out.stdout, "text")?; }
-                last = Some(out.stdout);
-            }
-            std::thread::sleep(std::time::Duration::from_millis(700));
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            let now = pasteboard::change_count();
+            if now == seen { continue; }
+            seen = now;
+            let result = match pasteboard::read() {
+                Some(Copied::Text(t)) => record(t.as_bytes(), "text"),
+                Some(Copied::Png(png)) => record(&png, "image/png"),
+                Some(Copied::Files(urls)) => record((urls.join("\n") + "\n").as_bytes(), "text"),
+                None => Ok(()),
+            };
+            // One bad write (a full disk) shouldn't end the watcher.
+            if let Err(e) = result { eprintln!("tomboy: clipboard: {e}"); }
         }
     }
 }
