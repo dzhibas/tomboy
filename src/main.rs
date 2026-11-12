@@ -26,6 +26,7 @@ mod frecency;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod omarchy;
 mod platform;
+mod quicklinks;
 mod sys;
 mod url;
 
@@ -137,6 +138,10 @@ struct Tomboy {
     frecency: frecency::Store,
     /// The picked clip's picture (kept here: the cache drops an image nobody holds).
     clip_image: Option<(std::path::PathBuf, Image)>,
+    /// `[quicklinks]` from the config.
+    links: Vec<quicklinks::Quicklink>,
+    /// The quicklink whose argument is being typed (argument mode).
+    quicklink: Option<usize>,
 }
 
 /// The emoji picker's grid for the current query, and the picked cell.
@@ -164,6 +169,8 @@ enum Item {
     Emoji,
     /// A clip in the history.
     Clip(usize),
+    /// A quicklink, with the argument typed for it so far.
+    Quicklink { link: usize, arg: Option<String> },
 }
 
 impl Item {
@@ -185,6 +192,11 @@ impl Item {
             Item::Clipboard => "Open Clipboard History",
             Item::Emoji => "Open Emoji Picker",
             Item::Clip(_) => "Copy to Clipboard",
+            Item::Quicklink { link, arg } => {
+                let l = &s.links[*link];
+                if l.arg.is_some() && arg.is_none() { "Enter Argument" }
+                else if l.is_web() { "Open in Browser" } else { "Open Link" }
+            }
         }
     }
 }
@@ -213,7 +225,8 @@ fn init() -> Tomboy {
         platform, menu, conds: Conditions::default(), status,
         last_text: String::new(), dictated: Arc::default(), waker: None, chat: None, submenu: None,
         seed: answers::devtools::session_seed(), wake: Arc::new(|| {}),
-        clips: None, direct: false, emoji: None, clip_image: None, frecency, config,
+        clips: None, direct: false, emoji: None, clip_image: None, frecency,
+        links: quicklinks::load(&config), quicklink: None, config,
     };
     if rune::extra_args().iter().any(|a| a == "clipboard") {
         enter_clipboard(&mut s);
@@ -292,7 +305,25 @@ fn results(s: &Tomboy) -> Vec<Item> {
             else { omarchy::search(&s.menu, &s.conds, q, Some(id), MAX_APPS, menu_boost(s, q)) };
         return rows.into_iter().map(Item::Menu).collect();
     }
-    let mut items = Vec::new();
+    if let Some(link) = s.quicklink {
+        return if q.is_empty() { Vec::new() } else { vec![Item::Quicklink { link, arg: Some(q.to_string()) }] };
+    }
+    let mut items = search(s, q);
+    if let Some((_, target)) = alias_target(s) {
+        items.retain(|it| !same_item(it, &target));
+        items.insert(0, target);
+    }
+    items
+}
+
+/// The launcher's results for `q` (no alias applied).
+fn search(s: &Tomboy, q: &str) -> Vec<Item> {
+    let now = frecency::now();
+    let mut links = quicklinks::matches(&s.links, q);
+    links.sort_by_key(|h| std::cmp::Reverse((h.exact, s.frecency.boost(&frecency::link_key(&s.links[h.link].keyword), q, now))));
+    let link_item = |h: &quicklinks::Hit| Item::Quicklink { link: h.link, arg: h.arg.map(str::to_string) };
+    // The keyword typed in full (`jira`, `jira ABC-1`) goes first; a prefix sits with the commands.
+    let mut items: Vec<Item> = links.iter().filter(|h| h.exact).map(link_item).collect();
     if let Some(v) = calc::eval(q) {
         items.push(Item::Calc { expr: q.to_string(), value: calc::format(v) });
     }
@@ -306,8 +337,8 @@ fn results(s: &Tomboy) -> Vec<Item> {
     if emoji::matches_command(q) {
         items.push(Item::Emoji);
     }
+    items.extend(links.iter().filter(|h| !h.exact).map(link_item));
     let app_limit = if q.is_empty() { MAX_APPS } else { MAX_APP_HITS };
-    let now = frecency::now();
     let app_boost = |i: usize| s.frecency.boost(&frecency::app_key(&s.apps[i].id), q, now);
     items.extend(apps::search(&s.apps, q, app_limit, app_boost).into_iter().map(Item::App));
     items.extend(omarchy::search(&s.menu, &s.conds, q, None, MAX_MENU_HITS, menu_boost(s, q)).into_iter().map(Item::Menu));
@@ -316,6 +347,28 @@ fn results(s: &Tomboy) -> Vec<Item> {
         items.push(Item::WebSearch(q.to_string()));
     }
     items
+}
+
+/// When the query is exactly an `[aliases]` key: the alias and the best launcher match for
+/// what it stands for (an app, a menu command, a quicklink, `gh tomboy`).
+fn alias_target(s: &Tomboy) -> Option<(String, Item)> {
+    let q = s.query.text.trim().to_lowercase();
+    if q.is_empty() { return None; }
+    let (alias, target) = s.config.aliases.iter().find(|(a, _)| a.trim().to_lowercase() == q)?;
+    let target = target.trim();
+    if target.is_empty() { return None; }
+    let hit = search(s, target).into_iter().find(|it| !matches!(it, Item::Agent(_) | Item::WebSearch(_)))?;
+    Some((alias.trim().to_string(), hit))
+}
+
+/// The same row (for moving an alias's target to the top).
+fn same_item(a: &Item, b: &Item) -> bool {
+    match (a, b) {
+        (Item::App(x), Item::App(y)) | (Item::Menu(x), Item::Menu(y)) => x == y,
+        (Item::Quicklink { link: x, arg: p }, Item::Quicklink { link: y, arg: q }) => x == y && p == q,
+        (Item::Clipboard, Item::Clipboard) | (Item::Emoji, Item::Emoji) => true,
+        _ => false,
+    }
 }
 
 /// Frecency points for Omarchy menu row `i` under query `q`.
@@ -330,6 +383,7 @@ fn frecency_key(s: &Tomboy, item: &Item) -> Option<String> {
     match item {
         Item::App(i) => Some(frecency::app_key(&s.apps[*i].id)),
         Item::Menu(i) if !omarchy::has_children(&s.menu, &s.menu[*i].id) => Some(frecency::menu_key(&s.menu[*i].id)),
+        Item::Quicklink { link, arg } if arg.is_some() || s.links[*link].arg.is_none() => Some(frecency::link_key(&s.links[*link].keyword)),
         _ => None,
     }
 }
@@ -370,9 +424,14 @@ fn run_item(s: &mut Tomboy, item: &Item, tx: &mut Tx) {
         Item::Clipboard => { enter_clipboard(s); Ok(After::Stay) }
         Item::Emoji => { enter_emoji(s); Ok(After::Stay) }
         Item::Clip(i) => copy_clip(s, *i, tx),
+        Item::Quicklink { link, arg } => match (&s.links[*link].arg, arg) {
+            (Some(_), None) => { enter_quicklink(s, Some(*link)); Ok(After::Stay) }
+            (_, arg) => url::open(&s.links[*link].expand(arg.as_deref().unwrap_or(""))).map(|()| After::Quit),
+        },
     };
     if let (Some(key), Ok(_)) = (&key, &outcome) {
-        let query = s.query.text.clone();
+        // In argument mode the field holds the argument; learn the keyword instead.
+        let query = match s.quicklink { Some(l) => s.links[l].keyword.clone(), None => s.query.text.clone() };
         s.frecency.record(key, &query, frecency::now());
     }
     match outcome {
@@ -541,6 +600,12 @@ fn enter_submenu(s: &mut Tomboy, id: Option<String>) {
     s.status = None;
 }
 
+/// Type the argument for quicklink `link`, or back to the launcher with `None`.
+fn enter_quicklink(s: &mut Tomboy, link: Option<usize>) {
+    enter_submenu(s, None);
+    s.quicklink = link;
+}
+
 /// One level up from the open submenu.
 fn leave_submenu(s: &mut Tomboy) {
     let up = s.submenu.as_deref().and_then(omarchy::parent_of).map(str::to_string);
@@ -624,6 +689,15 @@ fn on_input_key(s: &mut Tomboy, ev: &KeyEvent, tx: &mut Tx) -> bool {
             leave_clipboard(s);
             return true;
         }
+        // Typing a quicklink's argument: Esc clears it, then (like Backspace on an empty
+        // field) goes back to the launcher.
+        Key::Escape if s.quicklink.is_some() && !s.query.text.is_empty() => {
+            s.query.clear(); s.last_text.clear(); s.picked = 0; return true;
+        }
+        Key::Escape | Key::Backspace if s.quicklink.is_some() && s.query.text.is_empty() => {
+            enter_quicklink(s, None);
+            return true;
+        }
         // In a submenu, Esc (or Backspace on an empty field) goes back up a level.
         Key::Escape | Key::Backspace if s.submenu.is_some() && s.query.text.is_empty() => {
             leave_submenu(s);
@@ -646,10 +720,12 @@ fn view(s: &Tomboy, cx: &mut Cx<Tomboy>) -> El {
     let crumb = if s.chat.is_some() { None }
         else if s.clips.is_some() { Some("Clipboard History".to_string()) }
         else if s.emoji.is_some() { Some("Emoji & Symbols".to_string()) }
+        else if let Some(l) = s.quicklink { Some(s.links[l].name.clone()) }
         else { submenu_title(s) };
     let placeholder = if s.chat.is_some() { "Ask a follow-up…".to_string() }
         else if s.clips.is_some() { "Search clipboard…".to_string() }
         else if s.emoji.is_some() { "Search emoji and symbols…".to_string() }
+        else if let Some(l) = s.quicklink { s.links[l].prompt() }
         else if let Some(c) = &crumb { format!("Search {}…", c.rsplit(" › ").next().unwrap_or(c)) }
         else { "Search apps, calculate, or paste a URL…".to_string() };
     let field = text_input(&s.query, ty::title()).key("query").single_line().grow(1.0)
@@ -670,6 +746,7 @@ fn view(s: &Tomboy, cx: &mut Cx<Tomboy>) -> El {
             .child(text(c).font(ty::label()).color(t.text))
             .on_press(|s: &mut Tomboy| if s.emoji.is_some() { if !s.direct { leave_emoji(s) } }
                 else if s.clips.is_some() { if !s.direct { leave_clipboard(s) } }
+                else if s.quicklink.is_some() { enter_quicklink(s, None) }
                 else { leave_submenu(s) }));
     }
     let header = header.child(field);
@@ -706,6 +783,7 @@ fn results_body(s: &Tomboy, t: &tok::Theme, accent: Color) -> (El, String, (&'st
             Item::WebSearch(_) | Item::Agent(_) => "Fallback",
             Item::Clipboard | Item::Emoji => "Commands",
             Item::Clip(_) => "Clipboard",
+            Item::Quicklink { .. } => "Quicklinks",
             Item::Answer(a) if a.kind == Kind::Process => "Processes",
             _ => "Results",
         };
@@ -717,14 +795,19 @@ fn results_body(s: &Tomboy, t: &tok::Theme, accent: Color) -> (El, String, (&'st
         list = list.child(item_row(s, item, i, i == s.picked, t, accent));
     }
     if items.is_empty() {
+        let empty = match s.quicklink {
+            Some(l) => format!("Type the {} and press Enter", s.links[l].prompt().trim_end_matches('…').to_lowercase()),
+            None => "No results".into(),
+        };
         list = list.child(col().h(120.0).w_full().center()
-            .child(text("No results").font(ty::body()).color(t.text_secondary)));
+            .child(text(empty).font(ty::body()).color(t.text_secondary)));
     }
     let body = col().w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(list);
     let action = items.get(s.picked).map(|it| it.action(s)).unwrap_or("");
-    let left = s.status.clone().unwrap_or_else(|| match &s.submenu {
-        Some(_) => format!("tomboy · {} · esc to go back", s.platform.name()),
-        None => format!("tomboy · {}", s.platform.name()),
+    let left = s.status.clone().unwrap_or_else(|| match (&s.submenu, s.quicklink) {
+        (_, Some(l)) => format!("tomboy · quicklink {} · esc to go back", s.links[l].keyword),
+        (Some(_), _) => format!("tomboy · {} · esc to go back", s.platform.name()),
+        (None, None) => format!("tomboy · {}", s.platform.name()),
     });
     (body, left, (action, "↵"))
 }
@@ -924,6 +1007,16 @@ fn item_row(s: &Tomboy, item: &Item, i: usize, on: bool, t: &tok::Theme, accent:
             let clip = &s.clips.as_ref().expect("clips listed in clipboard mode")[*c];
             (glyph("⧉", accent), clip.title(), None, "Clip")
         }
+        Item::Quicklink { link, arg } => {
+            let l = &s.links[*link];
+            let (title, sub) = match arg {
+                Some(a) => (format!("Open {}: {a}", l.name), l.expand(a)),
+                None if l.arg.is_none() => (l.name.clone(), l.expand("")),
+                None => (l.name.clone(), l.url.clone()),
+            };
+            (glyph_in("\u{f0337}", Color { r: 0.25, g: 0.55, b: 0.95, a: 1.0 }, Some(NERD_FONT)), // nf-md-link_variant
+                title, Some(sub), "Quicklink")
+        }
         Item::App(a) => {
             let app = &s.apps[*a];
             let icon = match &s.icons[*a] {
@@ -952,6 +1045,12 @@ fn item_row(s: &Tomboy, item: &Item, i: usize, on: bool, t: &tok::Theme, accent:
                 else if entry.is_submenu() { "Omarchy Menu" } else { "Command" };
             (icon, title, sub, kind)
         }
+    };
+    // The row an alias pinned says so.
+    let subtitle = match alias_target(s) {
+        Some((alias, _)) if i == 0 && s.submenu.is_none() && s.quicklink.is_none() =>
+            Some(subtitle.map_or(format!("alias {alias}"), |sub| format!("alias {alias} · {sub}"))),
+        _ => subtitle,
     };
     let fg = if on { Color::WHITE } else { t.text };
     let fg2 = if on { Color::WHITE.alpha(0.75) } else { t.text_secondary };
@@ -1007,6 +1106,15 @@ fn clipboard_scene(s: &mut Tomboy) {
     s.direct = true;
 }
 
+/// Quicklinks and an alias for the headless scenes, instead of the real config's.
+fn demo_links(s: &mut Tomboy) {
+    s.links = vec![
+        quicklinks::Quicklink::new("gh", "https://github.com/search?q={query}", Some("GitHub search")),
+        quicklinks::Quicklink::new("jira", "issues.jira.com/browse/{a}", Some("Jira issue")),
+    ];
+    s.config.aliases = [("bubu".to_string(), "chromium".to_string())].into();
+}
+
 fn main() {
     // Headless subcommands that record the clipboard history; no window.
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -1044,6 +1152,10 @@ fn main() {
             ("date", |s| s.query = TextEdit::new("days until 25 dec")),
             ("date-offset", |s| s.query = TextEdit::new("monday in 3 weeks")),
             ("percent", |s| s.query = TextEdit::new("15% of 200")),
+            ("quicklink", |s| { demo_links(s); s.query = TextEdit::new("jira ABC-1"); }),
+            ("quicklink-command", |s| { demo_links(s); s.query = TextEdit::new("ji"); }),
+            ("quicklink-arg", |s| { demo_links(s); s.quicklink = Some(1); }),
+            ("alias", |s| { demo_links(s); s.query = TextEdit::new("bubu"); }),
         ],
         ..AppSpec::new("tomboy", (WIDTH, HEIGHT), init, view)
     };

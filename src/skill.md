@@ -8,8 +8,8 @@ window as Markdown: keep it short.
 ## Changing tomboy's settings
 
 When the user asks to change how tomboy behaves ("change the working directory to ~/sites",
-"run the agent in my projects folder", "use codex instead", "use haiku", "make the text bigger", "font size 16", "what can I
-configure in tomboy?"), edit tomboy's config file. Do not edit tomboy's source code for this.
+"run the agent in my projects folder", "use codex instead", "use haiku", "make the text bigger", "font size 16", "add a quicklink
+jira for …", "alias bubu to chromium", "what can I configure in tomboy?"), edit tomboy's config file. Do not edit tomboy's source code for this.
 
 - **File**: `~/.config/tomboy/config.toml` (`$XDG_CONFIG_HOME/tomboy/config.toml` when that is set).
   It is optional: create it, and the `~/.config/tomboy/` directory, when missing.
@@ -78,6 +78,62 @@ Font size: relative requests change the current value (13 when unset) in steps o
 "reset the font size" → delete the `font_size` line. Never go outside 9–24; if a step would,
 use the limit and say so. Whole numbers are fine; halves (`14.5`) work too.
 
+### `[quicklinks]`
+
+A quicklink is a keyword that opens a URL with what the user types filled in. One line per
+quicklink, the key being the keyword:
+
+| Form | Example |
+| --- | --- |
+| URL only | `gh = "https://github.com/search?q={query}"` |
+| URL and display name | `jira = { url = "https://issues.jira.com/browse/{a}", name = "Jira issue" }` |
+
+- **Placeholder**: `{…}` with any one-word name (`{a}`, `{query}`, `{issue}`) is where the
+  argument goes; tomboy URL-encodes it. Every placeholder gets the same argument. The name is
+  shown as the prompt ("Issue…"), so pick a meaningful one when the user names it
+  ("with the issue key as argument" → `{issue}`); otherwise use `{query}`.
+- **No placeholder**: a bookmark. Typing the keyword opens the URL as it is.
+- **Keyword**: one word, no spaces; tomboy matches it case-insensitively. Quote keys with
+  other characters (`"g-docs" = …`). Typing the whole keyword puts the quicklink above
+  everything else, so don't reuse an app's name as a keyword (`firefox`); short ones (`gh`,
+  `jira`, `yt`) are best.
+- **URL**: may leave out `https://` (`issues.jira.com/browse/{a}` works). Other schemes
+  (`obsidian://`, `mailto:`) open in their app.
+- **In the launcher**: `jira ABC-1` opens it straight away; `jira` + Enter asks for the
+  argument.
+
+"Add a quicklink jira for issues.jira.com/browse/ with the issue as argument" →
+
+```toml
+[quicklinks]
+jira = { url = "https://issues.jira.com/browse/{issue}", name = "Jira issue" }
+```
+
+When the user gives a URL with the argument at the end ("…/browse/" + ticket), append the
+placeholder there. When they say where the argument goes in the middle of a URL, put it there.
+If you can't tell, ask. "Remove the jira quicklink" → delete its line (and the `[quicklinks]`
+header when the table is empty). "Rename it", "change the URL" → edit that line. "What
+quicklinks do I have?" → list them.
+
+### `[aliases]`
+
+An alias is another word for something tomboy can already find: `bubu = "chromium"` makes
+typing `bubu` put Chromium first, so Enter opens it.
+
+```toml
+[aliases]
+bubu = "chromium"
+ghs = "gh tomboy"
+```
+
+- The key is exactly what the user types (case-insensitive; a short word is best).
+- The value is a search tomboy runs: an app name (`chromium`, `Files`), an Omarchy menu
+  command (`lock screen`, `theme`), or a quicklink with its argument (`gh tomboy`). tomboy
+  takes the first match, so make it specific enough. Check an app's name with the `.desktop`
+  files (`Name=`) when unsure.
+- "Remove the bubu alias" → delete its line. An alias for a keyword that's also a quicklink
+  keyword: the quicklink row still shows, below the alias's pick.
+
 Example:
 
 ```toml
@@ -94,6 +150,13 @@ frecency = false
 
 [ui]
 font_size = 15
+
+[quicklinks]
+gh = "https://github.com/search?q={query}"
+jira = { url = "https://issues.jira.com/browse/{issue}", name = "Jira issue" }
+
+[aliases]
+bubu = "chromium"
 ```
 
 ## Search ranking (usage history)
@@ -113,8 +176,8 @@ pick for a query (`news` → hackernews). The history is a separate file, not th
   }
   ```
 
-  Keys are `app:<desktop file id>` for applications and `menu:<omarchy menu id>` for Omarchy
-  commands. A desktop file id isn't always the app's name (Files is
+  Keys are `app:<desktop file id>` for applications, `menu:<omarchy menu id>` for Omarchy
+  commands, `link:<keyword>` for quicklinks and `emoji:<emoji>` for the emoji picker. A desktop file id isn't always the app's name (Files is
   `org.gnome.Nautilus.desktop`): match the user's words against the keys, and if none fits,
   look up `Name=` in the `.desktop` files under `~/.local/share/applications` and
   `/usr/share/applications`.

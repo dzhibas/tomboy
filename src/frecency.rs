@@ -3,7 +3,7 @@
 //!
 //! Kept in `~/.local/state/tomboy/frecency.json` (`$XDG_STATE_HOME` honoured); delete it to
 //! start over, or remove one item's entry to forget it (the agent can, see `skill.md`). Items
-//! are keyed `app:<desktop id>` or `menu:<omarchy id>`.
+//! are keyed `app:<desktop id>`, `menu:<omarchy id>`, `link:<quicklink keyword>` or `emoji:<char>`.
 //!
 //! [`Store::boost`] is added to a match's tier score (exact 1000, prefix 900, word 800,
 //! substring 700, …): up to 150 for frecency, so a habit wins ties and lifts about a tier,
@@ -55,6 +55,8 @@ pub fn now() -> u64 {
 /// The key of an app (its desktop file id) and of an Omarchy menu command.
 pub fn app_key(id: &str) -> String { format!("app:{id}") }
 pub fn menu_key(id: &str) -> String { format!("menu:{id}") }
+/// The key of a quicklink, by keyword.
+pub fn link_key(keyword: &str) -> String { format!("link:{keyword}") }
 
 impl Store {
     /// The store on disk; empty when there is none yet or it doesn't parse.

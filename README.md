@@ -72,6 +72,8 @@ All OS commands live in `src/sys.rs` and `src/apps/{linux,macos}.rs` behind `#[c
   [Clipboard history](#clipboard-history).
 - **Emoji & symbols**: `tomboy emoji`, or type `emoji` in the launcher — see
   [Emoji & symbols](#emoji--symbols).
+- **Quicklinks & aliases**: `jira ABC-1` opens your Jira ticket, `gh tomboy` a GitHub search;
+  `bubu` opens Chromium. Set up in the config — see [Quicklinks & aliases](#quicklinks--aliases).
 - **Omarchy**: on Omarchy (detected via `$OMARCHY_PATH` or `/usr/share/omarchy`), every entry of the
   Omarchy menu is searchable — `lock`, `theme`, `hide bar`, `install docker`. Omarchy's defaults
   are merged with `~/.config/omarchy/extensions/omarchy-menu.jsonc`; `when`/`disabled`/`checked`
@@ -117,6 +119,14 @@ frecency = false
 [ui]
 # Text size in points; titles, labels and agent answers scale with it. Default 13.
 font_size = 15
+
+[quicklinks]
+# keyword = URL; {…} is where what you type goes.
+gh = "https://github.com/search?q={query}"
+jira = { url = "issues.jira.com/browse/{issue}", name = "Jira issue" }
+
+[aliases]
+bubu = "chromium"
 ```
 
 | Setting | Default | What it does |
@@ -126,6 +136,8 @@ font_size = 15
 | `agent.working_directory` | `~/Work`, else `~` | The agent's working directory. `~` is home; relative paths start at home. A missing directory falls back to the default. |
 | `search.frecency` | `true` | Learn from launches and rank by them (frecency, see the feature list). `false` ranks by name match only and records nothing; the history file is kept for when it's back on. |
 | `ui.font_size` | `13` | Text size in points (9–24). The search field, titles, labels and agent answers scale with it and rows grow to fit; icons and the window size stay. |
+| `quicklinks.<keyword>` | none | A URL pattern opened by a keyword, see [Quicklinks & aliases](#quicklinks--aliases). |
+| `aliases.<word>` | none | Another word for an app, command or quicklink, see [Quicklinks & aliases](#quicklinks--aliases). |
 
 A file that doesn't parse, or has an unknown key, is ignored as a whole; the footer says why
 (`config.toml ignored: unknown field …`).
@@ -144,10 +156,53 @@ in the launcher:
 
 > use haiku
 
+> add a quicklink jira for issues.jira.com/browse with the issue as argument
+
+> alias bubu to chromium
+
 and the agent writes `config.toml` for you and tells you it applies on the next launch. Claude
 gets the skill as an appended system prompt (`--append-system-prompt`, with `--add-dir
 ~/.config/tomboy` so it may write there); opencode, codex and crush get it ahead of the prompt.
 When you add an option, document it in `src/skill.md` too.
+
+## Quicklinks & aliases
+
+Two small things in `config.toml` that save typing.
+
+**Quicklinks** open a URL with what you type filled in:
+
+```toml
+[quicklinks]
+gh = "https://github.com/search?q={query}"
+jira = { url = "issues.jira.com/browse/{issue}", name = "Jira issue" }
+yt = "https://www.youtube.com/results?search_query={q}"
+news = "https://news.ycombinator.com"   # no {…}: a bookmark
+```
+
+- Type `jira ABC-1` and press Enter: `https://issues.jira.com/browse/ABC-1` opens in your
+  browser. The row shows the URL before you open it.
+- Type `jira` (or the start of it, `ji`) and press Enter: tomboy asks for the argument, with a
+  **Jira issue** chip and an `Issue…` prompt. Esc or Backspace on an empty field goes back.
+- `{…}` takes any one-word name, shown as the prompt; the argument is URL-encoded (a space is
+  `%20`). A URL without `https://` gets it; other schemes (`obsidian://`, `mailto:`) open in
+  their app. `name` is optional (default: the keyword).
+- Quicklinks you use rank first, like apps (frecency key `link:<keyword>`).
+
+**Aliases** are your own words for things tomboy can already find:
+
+```toml
+[aliases]
+bubu = "chromium"        # an app
+lk = "lock screen"       # an Omarchy command
+tb = "gh tomboy"         # a quicklink with its argument
+```
+
+Typing exactly `bubu` puts the best match for `chromium` first (its row says `alias bubu`),
+so Enter opens it; the usual results follow. An alias whose target matches nothing does
+nothing.
+
+Or ask the agent: "add a quicklink yt for youtube search", "remove the jira quicklink",
+"alias bubu to chromium".
 
 ## Emoji & symbols
 
@@ -264,6 +319,7 @@ On Omarchy, see [Install on Omarchy](#install-on-omarchy).
 | `src/emoji/` | Emoji & symbol data (`emoji.tsv`, `symbols.rs`), search and grid navigation |
 | `src/clipboard.rs` | Clipboard history: reading, searching, copying back, recording |
 | `src/frecency.rs` | Launch history: frecency and learned queries for ranking |
+| `src/quicklinks.rs` | Quicklinks: keyword matching and URL expansion |
 | `src/config.rs` | `~/.config/tomboy/config.toml`: loading and defaults |
 | `src/skill.md` | What the agent knows about tomboy's config (sent with every agent run) |
 | `src/sys.rs` | OS commands: open URL, clipboard, detached spawn |
@@ -285,6 +341,6 @@ CARGO_FEATURE_PURE=1 cargo check --target aarch64-apple-darwin
 ```sh
 cargo test
 cargo test live_claude -- --ignored   # runs the real claude CLI (tiny paid request)
-cargo run -- --snap shot.png --scene calc   # scenes: apps calc url web omarchy chat submenu units time dev kill currency
+cargo run -- --snap shot.png --scene calc   # scenes: apps calc url web omarchy chat submenu units time dev kill currency quicklink quicklink-arg alias
 cargo run -- --tree tree.json --scene apps
 ```

@@ -20,10 +20,20 @@
 //! [ui]
 //! # Text size in points for list rows; titles and labels scale with it. Default 13.
 //! font_size = 15
+//!
+//! [quicklinks]
+//! # keyword = URL; `{a}` (any `{name}`) is replaced by what you type after the keyword.
+//! gh = "https://github.com/search?q={query}"
+//! jira = { url = "issues.jira.com/browse/{a}", name = "Jira issue" }
+//!
+//! [aliases]
+//! # Typing the alias puts the target's best match first.
+//! bubu = "chromium"
 //! ```
 //!
 //! Every option is documented for the agent in `src/skill.md`; keep the two in step.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -36,6 +46,34 @@ pub struct Config {
     pub agent: AgentConfig,
     pub ui: UiConfig,
     pub search: SearchConfig,
+    /// Keyword → URL pattern (`crate::quicklinks`).
+    pub quicklinks: BTreeMap<String, QuicklinkConfig>,
+    /// What you type → what it stands for (`bubu = "chromium"`).
+    pub aliases: BTreeMap<String, String>,
+}
+
+/// A `[quicklinks]` entry: just the URL, or a table with a display name.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum QuicklinkConfig {
+    Url(String),
+    Full(QuicklinkTable),
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct QuicklinkTable {
+    pub url: String,
+    pub name: Option<String>,
+}
+
+impl QuicklinkConfig {
+    pub fn url(&self) -> &str {
+        match self { QuicklinkConfig::Url(u) => u, QuicklinkConfig::Full(t) => &t.url }
+    }
+    pub fn name(&self) -> Option<&str> {
+        match self { QuicklinkConfig::Url(_) => None, QuicklinkConfig::Full(t) => t.name.as_deref() }
+    }
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
@@ -65,7 +103,7 @@ pub struct AgentConfig {
     /// Where the agent runs; `~` expands to $HOME.
     pub working_directory: Option<String>,
     /// The model each agent uses, by agent command (`claude = "haiku"`); unset is its default.
-    pub models: std::collections::BTreeMap<String, String>,
+    pub models: BTreeMap<String, String>,
 }
 
 impl Config {
@@ -100,6 +138,17 @@ impl Config {
         if let Some(size) = self.ui.font_size.filter(|s| !FONT_SIZE_RANGE.contains(s)) {
             let (lo, hi) = (FONT_SIZE_RANGE.start(), FONT_SIZE_RANGE.end());
             return Some(format!("config: ui.font_size {size} is outside {lo}–{hi}; using {}", self.font_scale() * DEFAULT_FONT_SIZE));
+        }
+        for (keyword, link) in &self.quicklinks {
+            if keyword.trim().is_empty() || keyword.trim().contains(char::is_whitespace) {
+                return Some(format!("config: quicklink keyword \"{keyword}\" can't contain spaces; ignored"));
+            }
+            if link.url().trim().is_empty() {
+                return Some(format!("config: quicklinks.{keyword} has no url; ignored"));
+            }
+        }
+        if let Some((alias, _)) = self.aliases.iter().find(|(a, t)| a.trim().is_empty() || t.trim().is_empty()) {
+            return Some(format!("config: alias \"{alias}\" is empty; ignored"));
         }
         let home = sys::home_dir()?;
         let dir = self.agent.working_directory.as_deref()?;
@@ -185,6 +234,22 @@ mod tests {
         let (c, _) = parse("[ui]\nfont_size = 14.5\n");
         assert_eq!(c.font_scale(), 14.5 / 13.0);
         assert_eq!(c.warning(), None);
+    }
+
+    #[test]
+    fn quicklinks_and_aliases() {
+        let (c, err) = parse("[quicklinks]\ngh = \"https://github.com/search?q={query}\"\n\
+            jira = { url = \"issues.jira.com/browse/{a}\", name = \"Jira issue\" }\n\n[aliases]\nbubu = \"chromium\"\n");
+        assert_eq!(err, None);
+        assert_eq!(c.quicklinks["gh"].url(), "https://github.com/search?q={query}");
+        assert_eq!(c.quicklinks["gh"].name(), None);
+        assert_eq!(c.quicklinks["jira"].name(), Some("Jira issue"));
+        assert_eq!(c.aliases["bubu"], "chromium");
+        assert_eq!(c.warning(), None);
+        assert!(parse("[quicklinks]\njira = { url = \"x/{a}\", title = \"J\" }\n").1.is_some());
+        assert!(parse("[quicklinks]\n\"my link\" = \"x/{a}\"\n").0.warning().unwrap().contains("spaces"));
+        assert!(parse("[quicklinks]\njira = \" \"\n").0.warning().unwrap().contains("no url"));
+        assert!(parse("[aliases]\nbubu = \"\"\n").0.warning().unwrap().contains("empty"));
     }
 
     #[test]
