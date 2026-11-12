@@ -20,6 +20,7 @@ mod calc;
 mod clipboard;
 mod config;
 mod dictation;
+mod emoji;
 mod frecency;
 // Omarchy is Linux-only; on macOS the module compiles but `Platform::Omarchy` never occurs.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -31,7 +32,7 @@ mod url;
 use rune::tok::{self, type_};
 use rune::{
     App, AppSpec, Color, Cx, El, Family, Image, ImageCache, Key, KeyEvent, ScrollSpec, SurfaceFit, TextEdit, Tx,
-    WindowOptions, Waker, col, el, row, spacer, text, text_input,
+    WindowOptions, Waker, GrowthSpec, col, el, row, spacer, text, text_input,
 };
 use rune_kit::Markdown;
 
@@ -74,6 +75,8 @@ mod ty {
     pub fn title() -> TextStyle { sized(type_::TITLE.lh(28.0)) }
     pub fn body() -> TextStyle { sized(type_::BODY) }
     pub fn label() -> TextStyle { sized(type_::LABEL) }
+    /// A glyph in the emoji picker.
+    pub fn emoji() -> TextStyle { sized(TextStyle::new(32.0, 400.0).lh(40.0)) }
 
     /// Rune's neutral Markdown look with its text sizes scaled (sizes as `MarkdownStyle::from_kit`).
     pub fn markdown(dark: bool) -> rune_kit::MarkdownStyle {
@@ -123,14 +126,25 @@ struct Tomboy {
     /// The clipboard history being browsed, newest first; while set, tomboy lists it instead
     /// of search results.
     clips: Option<Vec<Clip>>,
-    /// Opened as `tomboy clipboard`: Esc closes instead of going back to the launcher.
-    clips_direct: bool,
+    /// Opened as `tomboy clipboard` / `tomboy emoji`: Esc closes instead of going back to the
+    /// launcher.
+    direct: bool,
+    /// The emoji & symbol picker; while set, tomboy shows its grid.
+    emoji: Option<EmojiView>,
     /// `~/.config/tomboy/config.toml`, read at launch.
     config: config::Config,
     /// What was launched, when and under which query, to rank usual picks first.
     frecency: frecency::Store,
     /// The picked clip's picture (kept here: the cache drops an image nobody holds).
     clip_image: Option<(std::path::PathBuf, Image)>,
+}
+
+/// The emoji picker's grid for the current query, and the picked cell.
+struct EmojiView {
+    rows: Vec<emoji::Row>,
+    pos: Option<emoji::Pos>,
+    /// Bumped whenever `rows` change, so the virtual grid re-keys its rows.
+    version: u64,
 }
 
 /// One row in the result list.
@@ -146,6 +160,8 @@ enum Item {
     Agent(String),
     /// "Clipboard History" in the launcher.
     Clipboard,
+    /// "Emoji & Symbols" in the launcher.
+    Emoji,
     /// A clip in the history.
     Clip(usize),
 }
@@ -167,6 +183,7 @@ impl Item {
             Item::WebSearch(_) => "Search the Web",
             Item::Agent(_) => "Ask Agent",
             Item::Clipboard => "Open Clipboard History",
+            Item::Emoji => "Open Emoji Picker",
             Item::Clip(_) => "Copy to Clipboard",
         }
     }
@@ -196,11 +213,14 @@ fn init() -> Tomboy {
         platform, menu, conds: Conditions::default(), status,
         last_text: String::new(), dictated: Arc::default(), waker: None, chat: None, submenu: None,
         seed: answers::devtools::session_seed(), wake: Arc::new(|| {}),
-        clips: None, clips_direct: false, clip_image: None, frecency, config,
+        clips: None, direct: false, emoji: None, clip_image: None, frecency, config,
     };
     if rune::extra_args().iter().any(|a| a == "clipboard") {
         enter_clipboard(&mut s);
-        s.clips_direct = true;
+        s.direct = true;
+    } else if rune::extra_args().iter().any(|a| a == "emoji") {
+        enter_emoji(&mut s);
+        s.direct = true;
     }
     s
 }
@@ -228,6 +248,11 @@ fn on_change(s: &mut Tomboy, _: &mut Tx) {
     if s.clips.is_some() {
         s.last_text = s.query.text.clone();
         sync_clip_image(s);
+        return;
+    }
+    if s.emoji.is_some() {
+        s.last_text = s.query.text.clone();
+        rebuild_emoji(s);
         return;
     }
     let burst = dictation::inserted(&s.last_text, &s.query.text).to_string();
@@ -260,6 +285,7 @@ fn results(s: &Tomboy) -> Vec<Item> {
     if let Some(clips) = &s.clips {
         return clipboard::search(clips, q).into_iter().map(Item::Clip).collect();
     }
+    if s.emoji.is_some() { return Vec::new(); } // the picker draws its own grid
     if let Some(id) = &s.submenu {
         // Inside a submenu: its rows, or a search of everything under it.
         let rows = if q.is_empty() { omarchy::children_of(&s.menu, &s.conds, id) }
@@ -276,6 +302,9 @@ fn results(s: &Tomboy) -> Vec<Item> {
     }
     if clipboard::matches_command(q) {
         items.push(Item::Clipboard);
+    }
+    if emoji::matches_command(q) {
+        items.push(Item::Emoji);
     }
     let app_limit = if q.is_empty() { MAX_APPS } else { MAX_APP_HITS };
     let now = frecency::now();
@@ -339,6 +368,7 @@ fn run_item(s: &mut Tomboy, item: &Item, tx: &mut Tx) {
         Item::WebSearch(q) => url::open(&format!("https://duckduckgo.com/?q={}", encode(q))).map(|()| After::Quit),
         Item::Agent(prompt) => ask_agent(s, prompt),
         Item::Clipboard => { enter_clipboard(s); Ok(After::Stay) }
+        Item::Emoji => { enter_emoji(s); Ok(After::Stay) }
         Item::Clip(i) => copy_clip(s, *i, tx),
     };
     if let (Some(key), Ok(_)) = (&key, &outcome) {
@@ -392,6 +422,89 @@ fn leave_clipboard(s: &mut Tomboy) {
     s.clips = None;
     s.clip_image = None;
     enter_submenu(s, s.submenu.clone());
+}
+
+/// Open the emoji & symbol picker.
+fn enter_emoji(s: &mut Tomboy) {
+    s.emoji = Some(EmojiView { rows: Vec::new(), pos: None, version: 0 });
+    s.query.clear();
+    s.last_text.clear();
+    s.status = None;
+    rebuild_emoji(s);
+}
+
+fn leave_emoji(s: &mut Tomboy) {
+    s.emoji = None;
+    enter_submenu(s, s.submenu.clone());
+}
+
+/// Frecency key of an emoji or symbol.
+fn emoji_key(ch: &str) -> String { format!("emoji:{ch}") }
+
+/// Lay out the grid for the current query: Recently Used and every group when empty, else the
+/// matches (frecency first among equals).
+fn rebuild_emoji(s: &mut Tomboy) {
+    const RECENT: usize = 16;
+    let q = s.query.text.trim().to_string();
+    let now = frecency::now();
+    let all = emoji::all();
+    let boost = |i: usize| s.frecency.boost(&emoji_key(all[i].ch), &q, now);
+    let sections = if q.is_empty() {
+        let mut used: Vec<(u32, usize)> = (0..all.len()).map(|i| (boost(i), i)).filter(|(b, _)| *b > 0).collect();
+        used.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        emoji::browse(used.into_iter().take(RECENT).map(|(_, i)| i).collect())
+    } else {
+        vec![("Results".to_string(), emoji::search(&q, boost))]
+    };
+    let rows = emoji::grid(sections);
+    if let Some(v) = &mut s.emoji {
+        v.pos = emoji::first(&rows);
+        v.rows = rows;
+        v.version += 1;
+    }
+}
+
+/// The picked emoji or symbol.
+fn picked_glyph(s: &Tomboy) -> Option<&'static emoji::Glyph> {
+    let v = s.emoji.as_ref()?;
+    emoji::at(&v.rows, v.pos?).map(|i| &emoji::all()[i])
+}
+
+/// Copy the picked emoji and close (stay open when the copy lives in tomboy itself).
+fn copy_emoji(s: &mut Tomboy, tx: &mut Tx) {
+    let Some(g) = picked_glyph(s) else { return };
+    let query = s.query.text.clone();
+    s.frecency.record(&emoji_key(g.ch), &query, frecency::now());
+    match sys::copy_to_clipboard(g.ch) {
+        Ok(true) => quit(s, tx),
+        Ok(false) => { tx.copy(g.ch); s.status = Some(format!("Copied {}", g.ch)); }
+        Err(e) => s.status = Some(format!("Failed: {e}")),
+    }
+}
+
+/// Arrow keys, Tab and Esc in the picker.
+fn emoji_key_event(s: &mut Tomboy, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    let Some(v) = &mut s.emoji else { return false };
+    let moved = |v: &mut EmojiView, f: &dyn Fn(&[emoji::Row], emoji::Pos) -> emoji::Pos| {
+        if let Some(p) = v.pos { v.pos = Some(f(&v.rows, p)); }
+        v.pos.map(|p| p.0)
+    };
+    let row = match ev.key {
+        Key::Left => moved(v, &|r, p| emoji::step(r, p, -1, 0)),
+        Key::Right => moved(v, &|r, p| emoji::step(r, p, 1, 0)),
+        Key::Up => moved(v, &|r, p| emoji::step(r, p, 0, -1)),
+        Key::Down => moved(v, &|r, p| emoji::step(r, p, 0, 1)),
+        Key::Tab => { let dir = if ev.mods.shift { -1 } else { 1 }; moved(v, &|r, p| emoji::section(r, p, dir)) }
+        Key::Escape if !s.query.text.is_empty() => {
+            s.query.clear(); s.last_text.clear(); rebuild_emoji(s); return true;
+        }
+        Key::Escape if s.direct => { quit(s, tx); return true; }
+        Key::Escape | Key::Backspace if s.query.text.is_empty() => { leave_emoji(s); return true; }
+        _ => return false,
+    };
+    // Keep the header above the first row of a section in view too.
+    if let Some(r) = row { tx.scroll_into_view(format!("er{}", r.saturating_sub(usize::from(r == 1)))); }
+    true
 }
 
 /// Put clip `i` back on the clipboard and close.
@@ -466,6 +579,7 @@ fn encode(q: &str) -> String {
 }
 
 fn submit(s: &mut Tomboy, tx: &mut Tx) {
+    if s.emoji.is_some() { copy_emoji(s, tx); return; }
     if let Some(run) = s.chat.clone() {
         if run.lock().is_running() { return; }
         if s.query.text.trim().is_empty() {
@@ -495,6 +609,7 @@ fn on_input_key(s: &mut Tomboy, ev: &KeyEvent, tx: &mut Tx) -> bool {
         }
         return true;
     }
+    if s.emoji.is_some() { return emoji_key_event(s, ev, tx); }
     let n = results(s).len();
     match ev.key {
         Key::Down if n > 0 => s.picked = (s.picked + 1) % n,
@@ -503,8 +618,8 @@ fn on_input_key(s: &mut Tomboy, ev: &KeyEvent, tx: &mut Tx) -> bool {
         Key::Escape if s.clips.is_some() && !s.query.text.is_empty() => {
             s.query.clear(); s.last_text.clear(); s.picked = 0; sync_clip_image(s); return true;
         }
-        Key::Escape if s.clips.is_some() && s.clips_direct => { quit(s, tx); return true; }
-        Key::Escape | Key::Backspace if s.clips.is_some() && s.query.text.is_empty() && !s.clips_direct => {
+        Key::Escape if s.clips.is_some() && s.direct => { quit(s, tx); return true; }
+        Key::Escape | Key::Backspace if s.clips.is_some() && s.query.text.is_empty() && !s.direct => {
             leave_clipboard(s);
             return true;
         }
@@ -529,9 +644,11 @@ fn view(s: &Tomboy, cx: &mut Cx<Tomboy>) -> El {
 
     let crumb = if s.chat.is_some() { None }
         else if s.clips.is_some() { Some("Clipboard History".to_string()) }
+        else if s.emoji.is_some() { Some("Emoji & Symbols".to_string()) }
         else { submenu_title(s) };
     let placeholder = if s.chat.is_some() { "Ask a follow-up…".to_string() }
         else if s.clips.is_some() { "Search clipboard…".to_string() }
+        else if s.emoji.is_some() { "Search emoji and symbols…".to_string() }
         else if let Some(c) = &crumb { format!("Search {}…", c.rsplit(" › ").next().unwrap_or(c)) }
         else { "Search apps, calculate, or paste a URL…".to_string() };
     let field = text_input(&s.query, ty::title()).key("query").single_line().grow(1.0)
@@ -550,7 +667,8 @@ fn view(s: &Tomboy, cx: &mut Cx<Tomboy>) -> El {
         // The open submenu, as a chip; clicking it goes back up.
         header = header.child(row().key("crumb").h(ty::px(28.0)).px(10.0).radius(7.0).center_y().fill(t.control_off)
             .child(text(c).font(ty::label()).color(t.text))
-            .on_press(|s: &mut Tomboy| if s.clips.is_some() { if !s.clips_direct { leave_clipboard(s) } }
+            .on_press(|s: &mut Tomboy| if s.emoji.is_some() { if !s.direct { leave_emoji(s) } }
+                else if s.clips.is_some() { if !s.direct { leave_clipboard(s) } }
                 else { leave_submenu(s) }));
     }
     let header = header.child(field);
@@ -558,6 +676,7 @@ fn view(s: &Tomboy, cx: &mut Cx<Tomboy>) -> El {
     let (body, left, action) = match &s.chat {
         Some(run) => chat_body(s, run, dark, &t),
         None if s.clips.is_some() => clipboard_body(s, &t, accent),
+        None if s.emoji.is_some() => emoji_body(s, &t, accent),
         None => results_body(s, &t, accent),
     };
     let footer = row().h(ty::px(40.0)).px(16.0).gap(10.0).center_y().fill(t.bg)
@@ -584,7 +703,7 @@ fn results_body(s: &Tomboy, t: &tok::Theme, accent: Color) -> (El, String, (&'st
             Item::Menu(_) if s.submenu.is_some() => "Commands",
             Item::Menu(_) => s.platform.name(),
             Item::WebSearch(_) | Item::Agent(_) => "Fallback",
-            Item::Clipboard => "Commands",
+            Item::Clipboard | Item::Emoji => "Commands",
             Item::Clip(_) => "Clipboard",
             Item::Answer(a) if a.kind == Kind::Process => "Processes",
             _ => "Results",
@@ -635,7 +754,7 @@ fn clipboard_body(s: &Tomboy, t: &tok::Theme, accent: Color) -> (El, String, (&'
         .child(preview);
     let left = s.status.clone().unwrap_or_else(|| {
         let n = clips.len();
-        let back = if s.clips_direct { "esc to close" } else { "esc to go back" };
+        let back = if s.direct { "esc to close" } else { "esc to go back" };
         format!("tomboy · {n} clip{} · {back}", if n == 1 { "" } else { "s" })
     });
     let action = if picked.is_some() { "Copy to Clipboard" } else { "" };
@@ -688,6 +807,53 @@ fn clip_preview(s: &Tomboy, clip: &Clip, t: &tok::Theme) -> El {
             Some([w, h]) if clip.image_path().is_some() => format!("{} · {w}×{h}", clip.kind()),
             _ => clip.kind(),
         }).font(ty::label()).color(t.text_secondary).truncate())
+}
+
+/// The emoji grid: section headers and rows of big glyphs, built only where visible.
+fn emoji_body(s: &Tomboy, t: &tok::Theme, accent: Color) -> (El, String, (&'static str, &'static str)) {
+    let v = s.emoji.as_ref().expect("emoji mode");
+    let (text2, sel) = (t.text_secondary, accent.alpha(0.35));
+    let grid = col().key("emoji-grid").w_full().px(8.0).growth(GrowthSpec::default())
+        .virtual_rows(v.rows.len(), ty::px(64.0),
+            |_: &Tomboy, r| format!("er{r}").into(),
+            move |s: &Tomboy, r| {
+                let Some(v) = &s.emoji else { return el() };
+                match v.rows.get(r) {
+                    Some(emoji::Row::Header(title)) => row().h(ty::px(30.0)).px(8.0).center_y()
+                        .child(text(title.clone()).font(ty::label()).color(text2)),
+                    Some(emoji::Row::Cells(cells)) => {
+                        // Eight equal cells across, whatever the text size; a short last row
+                        // keeps them in their columns.
+                        let mut line = row().w_full().h(ty::px(64.0));
+                        for (c, &g) in cells.iter().enumerate() {
+                            let on = v.pos == Some((r, c));
+                            line = line.child(row().key(format!("e{r}-{c}")).w(0.0).grow(1.0).h_full().radius(10.0).center()
+                                .fill(if on { sel } else { Color::TRANSPARENT })
+                                .child(text(emoji::all()[g].ch).font(ty::emoji()))
+                                .on_hover(move |s: &mut Tomboy| if let Some(v) = &mut s.emoji { v.pos = Some((r, c)) })
+                                .on_press_tx(move |s: &mut Tomboy, tx: &mut Tx| {
+                                    if let Some(v) = &mut s.emoji { v.pos = Some((r, c)) }
+                                    copy_emoji(s, tx);
+                                }));
+                        }
+                        for _ in cells.len()..emoji::COLS { line = line.child(el().w(0.0).grow(1.0)); }
+                        line
+                    }
+                    None => el(),
+                }
+            })
+        .virtual_rows_version(v.version);
+    let body = if v.rows.is_empty() {
+        col().w_full().grow(1.0).center().child(text("No matching emoji").font(ty::body()).color(t.text_secondary))
+    } else {
+        col().key("emoji-scroll").w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(grid)
+    };
+    let left = s.status.clone().unwrap_or_else(|| match picked_glyph(s) {
+        Some(g) => format!("{} · {}", g.title(), g.group),
+        None => format!("tomboy · {}", if s.direct { "esc to close" } else { "esc to go back" }),
+    });
+    let action = if picked_glyph(s).is_some() { "Copy Emoji" } else { "" };
+    (body, left, (action, "↵"))
 }
 
 /// The agent conversation, streaming: prompts, Markdown answers, tool calls.
@@ -748,6 +914,8 @@ fn item_row(s: &Tomboy, item: &Item, i: usize, on: bool, t: &tok::Theme, accent:
         Item::Agent(q) => (glyph_in(AGENT_GLYPH, AGENT_COLOR, Some(NERD_FONT)), format!("Ask agent: “{q}”"), None, "Agent"),
         Item::WebSearch(q) => (glyph("⌕", Color { r: 0.45, g: 0.45, b: 0.5, a: 1.0 }),
             format!("Search the web for “{q}”"), None, "DuckDuckGo"),
+        Item::Emoji => (glyph_in("\u{f0c79}", Color { r: 0.98, g: 0.70, b: 0.15, a: 1.0 }, Some(NERD_FONT)), // nf-md-emoticon_happy
+            "Emoji & Symbols".into(), Some("Search emoji and symbols; Enter copies".into()), "Command"),
         Item::Clipboard => (glyph_in("\u{f0147}", Color { r: 0.85, g: 0.45, b: 0.65, a: 1.0 }, Some(NERD_FONT)), // nf-md-clipboard_text
             "Clipboard History".into(), Some("Browse and copy what you copied".into()), "Command"),
         Item::Clip(c) => {
@@ -834,7 +1002,7 @@ fn clipboard_scene(s: &mut Tomboy) {
         Clip::Text("file:///home/me/Pictures/screenshot.png".into()),
         Clip::Text("The quick brown fox jumps over the lazy dog.".into()),
     ]);
-    s.clips_direct = true;
+    s.direct = true;
 }
 
 fn main() {
@@ -868,6 +1036,9 @@ fn main() {
             ("currency", |s| s.query = TextEdit::new("123 eur to usd")),
             ("clipboard-command", |s| s.query = TextEdit::new("clip")),
             ("clipboard", clipboard_scene),
+            ("emoji", |s| { enter_emoji(s); s.direct = true; }),
+            ("emoji-search", |s| { enter_emoji(s); s.direct = true; s.query = TextEdit::new("heart"); rebuild_emoji(s); }),
+            ("emoji-command", |s| s.query = TextEdit::new("emoji")),
             ("date", |s| s.query = TextEdit::new("days until 25 dec")),
             ("date-offset", |s| s.query = TextEdit::new("monday in 3 weeks")),
             ("percent", |s| s.query = TextEdit::new("15% of 200")),

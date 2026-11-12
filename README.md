@@ -38,6 +38,8 @@ All OS commands live in `src/sys.rs` and `src/apps/{linux,macos}.rs` behind `#[c
   | `kill chromium` | matching processes with pid, CPU and memory — Enter sends SIGTERM |
 - **Clipboard history**: `tomboy clipboard`, or type `clip` in the launcher — see
   [Clipboard history](#clipboard-history).
+- **Emoji & symbols**: `tomboy emoji`, or type `emoji` in the launcher — see
+  [Emoji & symbols](#emoji--symbols).
 - **Omarchy**: on Omarchy (detected via `$OMARCHY_PATH` or `/usr/share/omarchy`), every entry of the
   Omarchy menu is searchable — `lock`, `theme`, `hide bar`, `install docker`. Omarchy's defaults
   are merged with `~/.config/omarchy/extensions/omarchy-menu.jsonc`; `when`/`disabled`/`checked`
@@ -107,6 +109,39 @@ and the agent writes `config.toml` for you and tells you it applies on the next 
 gets the skill as an appended system prompt (`--append-system-prompt`, with `--add-dir
 ~/.config/tomboy` so it may write there); opencode, codex and crush get it ahead of the prompt.
 When you add an option, document it in `src/skill.md` too.
+
+## Emoji & symbols
+
+A Raycast-style picker: a grid of big emoji, searchable, with your recent picks first.
+
+- **Open it**: run `tomboy emoji` (bind it to a key, below), or type `emoji`, `symbols` or
+  `smiley` in the launcher and press Enter on **Emoji & Symbols**.
+- **Find one**: type to search names and keywords (`fire`, `thumbs`, `lol` → 🤣, `cmd` → ⌘,
+  `euro`); every word must match. With an empty field the grid shows **Recently Used**, then
+  every Unicode group, then **Text Symbols** (arrows, math, currency, typography, keyboard
+  keys like ⌘ ⌥ ⇧, Greek letters, check marks).
+- **Move**: ←/→/↑/↓ move through the grid, Tab / Shift+Tab jump between sections, hover picks.
+  The footer shows the picked one's name.
+- **Use it**: Enter (or click) copies it and closes tomboy; paste with Ctrl+V. Picks feed
+  Recently Used and rank higher next time (frecency; off with `[search] frecency = false`).
+- **Esc** clears the search, then closes (or returns to the launcher).
+
+Data: 1,900+ emoji from Unicode's `emoji-test.txt` (v17, no skin-tone variants) with search
+keywords from Omarchy's emoji picker (MIT), generated into `src/emoji/emoji.tsv` by
+`scripts/gen-emoji.py`; text symbols are in `src/emoji/symbols.rs`.
+
+Bind it in Hyprland:
+
+```
+bind = SUPER CTRL, E, exec, ~/Work/tomboy/target/release/tomboy emoji
+```
+
+On Omarchy SUPER+CTRL+E opens Omarchy's own emoji picker, so replace it in
+`~/.config/hypr/bindings.lua`:
+
+```lua
+o.rebind("SUPER + CTRL + E", "Tomboy emoji", "/home/me/Work/tomboy/target/release/tomboy emoji")
+```
 
 ## Clipboard history
 
@@ -190,6 +225,7 @@ For the clipboard history key, see [Bind it to a key in Hyprland](#bind-it-to-a-
 | `src/dictation.rs` | Detecting Superwhisper dictation |
 | `src/agent.rs` | Handing a prompt to the coding agent |
 | `src/answers/` | Units, currency, date math, time zones, developer utilities, kill process |
+| `src/emoji/` | Emoji & symbol data (`emoji.tsv`, `symbols.rs`), search and grid navigation |
 | `src/clipboard.rs` | Clipboard history: reading, searching, copying back, recording |
 | `src/frecency.rs` | Launch history: frecency and learned queries for ranking |
 | `src/config.rs` | `~/.config/tomboy/config.toml`: loading and defaults |
