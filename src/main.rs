@@ -467,7 +467,9 @@ fn search(s: &Tomboy, q: &str) -> Vec<Item> {
     if emoji::matches_command(q) {
         items.push(Item::Emoji);
     }
-    items.extend(extui::search(s, q));
+    // Typed: extension commands rank with the other commands. Empty: they follow your apps.
+    let ext_items = extui::search(s, q);
+    let ext_items = if q.is_empty() { Some(ext_items) } else { items.extend(ext_items); None };
     if extui::store_matches(q) {
         items.push(Item::Store);
     }
@@ -475,6 +477,7 @@ fn search(s: &Tomboy, q: &str) -> Vec<Item> {
     let app_limit = if q.is_empty() { MAX_APPS } else { MAX_APP_HITS };
     let app_boost = |i: usize| s.frecency.boost(&frecency::app_key(&s.apps[i].id), q, now);
     items.extend(apps::search(&s.apps, q, app_limit, app_boost).into_iter().map(Item::App));
+    items.extend(ext_items.into_iter().flatten());
     items.extend(omarchy::search(&s.menu, &s.conds, q, None, MAX_MENU_HITS, menu_boost(s, q)).into_iter().map(Item::Menu));
     if !q.is_empty() && !matches!(items.first(), Some(Item::Calc { .. } | Item::Answer(_) | Item::Url(_))) {
         items.push(Item::Agent(q.to_string()));
@@ -1747,5 +1750,22 @@ mod extension_flow_tests {
         assert!(matches!(results(&s).first(), Some(Item::Extension { ext: 0, command: 0 })));
         s.query = TextEdit::new("install ext");
         assert!(results(&s).contains(&Item::Store));
+    }
+
+    /// With an empty field, a used extension command comes after the applications.
+    #[test]
+    fn empty_launcher_lists_apps_before_extensions() {
+        let mut s = init();
+        extui::command_scene(&mut s);
+        let id = s.extensions[0].0.id.clone();
+        let cmd = s.extensions[0].0.commands[0].id.clone();
+        s.frecency = frecency::Store::default(); // in memory: never writes the real history file
+        s.frecency.record(&extui::frecency_key(&id, &cmd), "", frecency::now());
+        s.query = TextEdit::new("");
+        let items = results(&s);
+        let ext = items.iter().position(|i| matches!(i, Item::Extension { .. })).expect("used extension listed");
+        if let Some(app) = items.iter().position(|i| matches!(i, Item::App(_))) {
+            assert!(app < ext, "apps first: {items:?}");
+        }
     }
 }

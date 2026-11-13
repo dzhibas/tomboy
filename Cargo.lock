@@ -3584,7 +3584,7 @@ dependencies = [
 
 [[package]]
 name = "tomboy"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "jiff",
  "objc2 0.6.5",
