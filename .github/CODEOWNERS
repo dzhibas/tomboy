@@ -1,0 +1,14 @@
+# Who must review what. The last matching line wins, so keep the general lines first.
+# See CONTRIBUTING.md#codeowners.
+
+# CI, templates and this file.
+/.github/ @dzhibas
+
+# Every extension change, and extensions/index.json, needs the maintainer.
+/extensions/ @dzhibas
+
+# One line per extension: its author, then @dzhibas (a folder's line replaces the one
+# above, so the maintainer must stay on it). Contributors add their line in a small PR
+# after their extension is merged:
+#   /extensions/<id>/ @<github-login> @dzhibas
+/extensions/hackernews/ @dzhibas

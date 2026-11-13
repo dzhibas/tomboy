@@ -1,0 +1,143 @@
+# Validates the extension registry (extensions/) and the extension runtime (src/ext/).
+# The job is named `extensions`: that is the status check branch protection requires
+# (see CONTRIBUTING.md#repository-settings).
+name: extensions
+
+on:
+  pull_request:
+    paths:
+      - "extensions/**"
+      - "src/ext/**"
+      - ".github/workflows/extensions.yml"
+  push:
+    branches: [main]
+    paths:
+      - "extensions/**"
+      - "src/ext/**"
+      - ".github/workflows/extensions.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: extensions-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  extensions:
+    name: extensions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history, so the PR can be compared with its base branch.
+          fetch-depth: 0
+
+      # tomboy is a Rune (wgpu + winit) GUI app. Most windowing libraries are loaded at run
+      # time, but their -sys crates look for them with pkg-config at build time. Luau and
+      # ring need a C/C++ compiler, which the runner already has.
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libfontconfig1-dev \
+            libfreetype-dev \
+            libx11-dev \
+            libx11-xcb-dev \
+            libxcb1-dev \
+            libxcursor-dev \
+            libxrandr-dev \
+            libxi-dev
+
+      # No rust-toolchain file: the latest stable (edition 2024 and let-chains need 1.88+).
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build
+
+      - name: Test the extension runtime
+        run: cargo test "ext::"
+
+      - name: extensions/index.json is up to date
+        run: ./target/debug/tomboy ext index --check
+
+      # On main (after a merge): check every extension in the registry.
+      - name: Check every extension
+        if: github.event_name == 'push'
+        run: |
+          set -euo pipefail
+          for dir in extensions/*/; do
+            [ -f "$dir/tomboy.toml" ] || continue
+            ./target/debug/tomboy ext check "${dir%/}"
+          done
+
+      # On a pull request: the rules in CONTRIBUTING.md#pull-request-flow.
+      - name: Pull request rules
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          base="origin/$BASE_REF"
+          changed="$(git diff --name-only "$base"...HEAD)"
+          echo "Files changed against $base:"
+          echo "$changed" | sed 's/^/  /'
+
+          # Extension folders touched: extensions/<id>/… (index.json and README.md directly
+          # in extensions/ are not extension folders).
+          exts="$(echo "$changed" | sed -n 's#^extensions/\([^/]*\)/.*#\1#p' | sort -u)"
+          # Anything outside extensions/.
+          outside="$(echo "$changed" | grep -v '^extensions/' || true)"
+
+          if [ -z "$exts" ]; then
+            echo "No extension folder changed."
+            exit 0
+          fi
+
+          count="$(echo "$exts" | wc -l)"
+          if [ "$count" -gt 1 ]; then
+            echo "::error::This PR changes $count extensions ($(echo $exts)). Send one extension per pull request."
+            exit 1
+          fi
+
+          if [ -n "$outside" ]; then
+            echo "::error::This PR changes an extension and files outside extensions/. Send tomboy changes in their own pull request:"
+            echo "$outside" | sed 's/^/  /'
+            exit 1
+          fi
+
+          id="$exts"
+          dir="extensions/$id"
+          if [ ! -d "$dir" ]; then
+            echo "$dir was removed; nothing to check."
+            exit 0
+          fi
+
+          ./target/debug/tomboy ext check "$dir"
+
+          # A change to an extension that already exists on the base branch must raise its
+          # version, or installed copies never update.
+          if git cat-file -e "$base:$dir/tomboy.toml" 2>/dev/null; then
+            git show "$base:$dir/tomboy.toml" > "$RUNNER_TEMP/base.toml"
+            python3 - "$RUNNER_TEMP/base.toml" "$dir/tomboy.toml" <<'PY'
+          import sys, tomllib
+
+          def version(path):
+              with open(path, "rb") as f:
+                  v = tomllib.load(f)["version"]
+              return v, tuple(int(p) for p in v.split("."))
+
+          (old, old_t), (new, new_t) = version(sys.argv[1]), version(sys.argv[2])
+          if new_t <= old_t:
+              print(f"::error file={sys.argv[2]}::version must increase: it is {new} on this branch and {old} on the base branch")
+              sys.exit(1)
+          print(f"version {old} -> {new}")
+          PY
+          else
+            echo "$id is a new extension."
+          fi

@@ -42,6 +42,14 @@
 //! [clipboard]
 //! # macOS: Enter on a clip or emoji also pastes it into the app in front. Default true.
 //! paste = false
+//!
+//! [extensions]
+//! # Where "Install Extension" lists extensions from. Default tomboy's GitHub repo.
+//! registry = "https://raw.githubusercontent.com/dzhibas/tomboy/main"
+//!
+//! [extensions.hackernews]
+//! # An extension's preferences, by the ids in its tomboy.toml.
+//! feed = "show_hn"
 //! ```
 //!
 //! Every option is documented for the agent in `src/skill.md`; keep the two in step.
@@ -66,6 +74,18 @@ pub struct Config {
     pub todo: TodoConfig,
     pub hotkeys: HotkeysConfig,
     pub clipboard: ClipboardConfig,
+    pub extensions: ExtensionsConfig,
+}
+
+/// `[extensions]`: where the store reads from, and each extension's preference values as
+/// `[extensions.<id>]` tables.
+#[derive(Debug, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ExtensionsConfig {
+    /// The registry's base URL (or a local checkout); default tomboy's GitHub repo.
+    pub registry: Option<String>,
+    #[serde(flatten)]
+    pub prefs: BTreeMap<String, toml::Table>,
 }
 
 /// Global shortcuts for the resident launcher (`tomboy daemon`, macOS). Unset is the
@@ -197,6 +217,17 @@ impl Config {
     /// Whether a picked clip or emoji is pasted into the front app too (default on).
     pub fn paste(&self) -> bool {
         self.clipboard.paste.unwrap_or(true)
+    }
+
+    /// The extension registry's base URL (`crate::ext::install::DEFAULT_REGISTRY` by default).
+    pub fn registry(&self) -> String {
+        self.extensions.registry.as_deref().map(str::trim).filter(|r| !r.is_empty())
+            .unwrap_or(crate::ext::install::DEFAULT_REGISTRY).trim_end_matches('/').to_string()
+    }
+
+    /// The user's `[extensions.<id>]` preference values.
+    pub fn extension_prefs(&self, id: &str) -> Option<&toml::Table> {
+        self.extensions.prefs.get(id)
     }
 
     /// Whether search learns from launches and ranks by them (default on).
@@ -340,6 +371,15 @@ mod tests {
         assert!(parse("[quicklinks]\n\"my link\" = \"x/{a}\"\n").0.warning().unwrap().contains("spaces"));
         assert!(parse("[quicklinks]\njira = \" \"\n").0.warning().unwrap().contains("no url"));
         assert!(parse("[aliases]\nbubu = \"\"\n").0.warning().unwrap().contains("empty"));
+    }
+
+    #[test]
+    fn extensions() {
+        let (c, err) = parse("[extensions]\nregistry = \"https://example.com/r/\"\n[extensions.hackernews]\nfeed = \"ask_hn\"\n");
+        assert_eq!(err, None);
+        assert_eq!(c.registry(), "https://example.com/r");
+        assert_eq!(c.extension_prefs("hackernews").and_then(|t| t.get("feed")).and_then(|v| v.as_str()), Some("ask_hn"));
+        assert_eq!(Config::default().registry(), crate::ext::install::DEFAULT_REGISTRY);
     }
 
     #[test]

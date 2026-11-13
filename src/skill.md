@@ -281,3 +281,98 @@ line: what was forgotten.
    next launch of tomboy.
 
 To undo a setting, delete its line (or the whole file) to go back to the default.
+
+## Extensions
+
+Extensions add commands to tomboy: sandboxed Luau scripts, one folder each. Installed ones
+live in `~/.local/share/tomboy/extensions/<id>/` (with `installed.json` beside them); the
+store inside tomboy (type `extensions`) installs them from tomboy's repo. Don't edit installed
+folders: an update replaces them.
+
+### Settings
+
+| Key | Type | Default | What it does |
+| --- | --- | --- | --- |
+| `[extensions] registry` | string (URL or path) | `https://raw.githubusercontent.com/dzhibas/tomboy/main` | Where the store reads `extensions/index.json` and the files from: an `https://` base, a `file://` URL or a local folder (a checkout of tomboy). Only change it when the user asks (a fork, testing a local checkout). |
+| `[extensions.<id>] <pref>` | as the extension declares | the manifest's `default` | An extension's preference values, by the preference ids in its `tomboy.toml` (`[[preferences]]`). |
+
+"Show me Ask HN in Hacker News", "hacker news should show newest" → read
+`~/.local/share/tomboy/extensions/hackernews/tomboy.toml` for the preference's id and options,
+then write:
+
+```toml
+[extensions.hackernews]
+feed = "ask_hn"
+```
+
+Use only a value from a dropdown's `options`; `true`/`false` for a checkbox; a string for
+text. If the extension isn't installed or has no such preference, say so. Applies on the next
+launch.
+
+Installing, updating and removing: `tomboy ext install <id> --yes`, `tomboy ext update`,
+`tomboy ext uninstall <id>`, `tomboy ext list`, `tomboy ext available`. Install shows the
+permissions it asks for (hosts it connects to): tell the user what they are before installing.
+
+### Writing one for the user
+
+"Make me an extension that …": write it in a folder (`~/Work/tomboy-extensions/<id>/`, or
+where the user says), not in the installed folder.
+
+1. `tomboy ext new <id> <parent dir>` scaffolds `tomboy.toml`, `init.luau`, `README.md`.
+2. Edit `tomboy.toml`: `name`, `description`, `author`, `[[commands]]` (`id`, `title`,
+   `subtitle`, `mode = "view"` or `"action"`, `keywords`), `[permissions] net` (exact
+   https hosts the script calls, nothing more), `[[preferences]]` (`id`, `type` = `text` |
+   `checkbox` | `dropdown`, `title`, `default`, `options`). Unknown keys are errors.
+3. Write `init.luau`: it returns a table with one function per command id, each
+   `function(ctx)` returning a view (or `nil` in action mode).
+4. Run `tomboy ext check <dir>` and fix every error it prints.
+5. Tell the user to run `tomboy ext dev <dir>` to try it (it opens a window; Ctrl/⌘+R
+   reloads after edits). Don't run `ext dev` yourself.
+
+The API (full reference: `docs/extensions.md` in tomboy's repo):
+
+```luau
+local api = require("@tomboy/api")
+local ui = require("@tomboy/ui")
+
+return {
+    ["my-command"] = function(ctx)                 -- ctx.command, ctx.query, ctx.preferences
+        task.defer(function()                      -- load after the first view is up
+            local ok, res = pcall(api.http.get, "https://api.example.com/items")
+            if not ok or res.status ~= 200 then
+                ui.update(ui.list({ items = {}, emptyText = "Couldn't load" }))
+                return
+            end
+            local items = {}
+            for _, it in api.json.decode(res.body).items do
+                table.insert(items, {
+                    id = it.id, title = it.name, subtitle = it.url,
+                    accessories = { api.time.ago(it.created) },
+                    detail = `## {it.name}`,        -- Markdown pane beside the list
+                    actions = { ui.open(it.url, "Open"), ui.copy(it.url, "Copy URL") },
+                })
+            end
+            ui.update(ui.list({ items = items, searchPlaceholder = "Filter…" }))
+        end)
+        return ui.list({ loading = true, items = {} })
+    end,
+}
+```
+
+- Views: `ui.list{ items, title?, loading?, emptyText?, searchPlaceholder?, filtering?,
+  onSearch? }` (items: `id, title, subtitle?, icon?, accessories?, keywords?, detail?,
+  actions`) and `ui.detail{ markdown, title?, actions? }`.
+- Actions: `ui.open(url, title?)`, `ui.copy(text, title?)`, `ui.push(buildFn, title?)`,
+  `ui.run(title, fn)` (title first). The first action is Enter; Ctrl/⌘+K lists them all.
+- Effects: `ui.update(view)`, `ui.toast(text)`, `ui.close()`.
+- `api.http.get(url, { headers? }) -> { status, body }`: https only, host must be in
+  `[permissions] net`, no redirects, 10 s timeout, 5 MB. It waits: call it in a command,
+  action or `task`, never at a module's top level. Errors raise; wrap in `pcall`.
+- `api.json.decode/encode`, `api.storage.get/set/remove(key)` (JSON values, 1 MB),
+  `api.cache.get(key, maxAgeSecs?)/set(key, string)`, `api.preferences`,
+  `api.time.now()`, `api.time.ago(epochSecs)`, `api.log(...)`, `task.spawn/defer/delay/wait`.
+- No `io`, files or processes; `require("@self/x")` loads `x.luau` from the same folder.
+  Each call may run 250 ms of Luau; heap 64 MB.
+
+To share it, the user forks tomboy, puts the folder in `extensions/`, runs `tomboy ext check`
+and `tomboy ext index`, and opens a pull request (see `CONTRIBUTING.md`).

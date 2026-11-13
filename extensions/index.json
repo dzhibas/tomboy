@@ -1,0 +1,58 @@
+{
+  "api": 1,
+  "extensions": [
+    {
+      "manifest": {
+        "id": "hackernews",
+        "name": "Hacker News",
+        "version": "1.0.0",
+        "api": 1,
+        "description": "Front page, newest, Show HN and Ask HN stories from Hacker News",
+        "author": "dzhibas",
+        "license": "MIT",
+        "icon": "",
+        "commands": [
+          {
+            "id": "front-page",
+            "title": "Hacker News",
+            "subtitle": "Top stories, points and comments",
+            "mode": "view",
+            "keywords": [
+              "hn",
+              "news",
+              "ycombinator",
+              "hacker"
+            ]
+          }
+        ],
+        "permissions": {
+          "net": [
+            "hn.algolia.com"
+          ]
+        },
+        "preferences": [
+          {
+            "id": "feed",
+            "type": "dropdown",
+            "title": "Feed",
+            "description": "Which stories to list: front_page, newest, show_hn or ask_hn",
+            "default": "front_page",
+            "options": [
+              "front_page",
+              "newest",
+              "show_hn",
+              "ask_hn"
+            ],
+            "required": false
+          }
+        ]
+      },
+      "files": {
+        "README.md": "3a042985f61279fd6cbd06da70b5bec6dcb79be422e20c953646986ef1fc0c2f",
+        "init.luau": "833988a712829aaac747b742cc129c5a035e8c02939abba41d26e0ad68a429d2",
+        "tomboy.toml": "08c79ec448bd4d55b0e2b1c863a1674d37f3ee874596b2787fa4e4e514f92343"
+      },
+      "readme": "# Hacker News\n\nThe Hacker News front page inside tomboy: type `hn`, pick a story, press Enter to open it.\n\n- **Enter** opens the story (or its discussion, for Ask HN)\n- **Ctrl/⌘+K** for more: Open Comments, Copy Link, Copy as Markdown, Refresh\n- Type to filter the stories by title or site\n\nStories come from the [Hacker News Search API](https://hn.algolia.com/api) and are cached\nfor five minutes, so reopening is instant.\n\n## Preferences\n\nPick the feed in `~/.config/tomboy/config.toml`:\n\n```toml\n[extensions.hackernews]\nfeed = \"show_hn\"   # front_page (default), newest, show_hn, ask_hn\n```\n"
+    }
+  ]
+}

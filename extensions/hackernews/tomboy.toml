@@ -1,0 +1,26 @@
+id = "hackernews"
+name = "Hacker News"
+version = "1.0.0"
+api = 1
+description = "Front page, newest, Show HN and Ask HN stories from Hacker News"
+author = "dzhibas"
+license = "MIT"
+icon = "\uF1D4"
+
+[[commands]]
+id = "front-page"
+title = "Hacker News"
+subtitle = "Top stories, points and comments"
+mode = "view"
+keywords = ["hn", "news", "ycombinator", "hacker"]
+
+[permissions]
+net = ["hn.algolia.com"]
+
+[[preferences]]
+id = "feed"
+type = "dropdown"
+title = "Feed"
+description = "Which stories to list: front_page, newest, show_hn or ask_hn"
+default = "front_page"
+options = ["front_page", "newest", "show_hn", "ask_hn"]

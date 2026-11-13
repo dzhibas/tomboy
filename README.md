@@ -112,6 +112,9 @@ All OS commands live in `src/sys.rs`, `src/apps/{linux,macos}.rs` and `src/mac/`
   [Todos](#todos).
 - **Quicklinks & aliases**: `jira ABC-1` opens your Jira ticket, `gh tomboy` a GitHub search;
   `bubu` opens Chromium. Set up in the config — see [Quicklinks & aliases](#quicklinks--aliases).
+- **Extensions**: more commands, installed from inside tomboy (type `extensions`), such as
+  Hacker News (`hn`). Sandboxed Luau scripts, each reviewed in a pull request to this repo —
+  see [Extensions](#extensions).
 - **Omarchy**: on Omarchy (detected via `$OMARCHY_PATH` or `/usr/share/omarchy`), every entry of the
   Omarchy menu is searchable — `lock`, `theme`, `hide bar`, `install docker`. Omarchy's defaults
   are merged with `~/.config/omarchy/extensions/omarchy-menu.jsonc`; `when`/`disabled`/`checked`
@@ -178,6 +181,14 @@ todo = ""
 [clipboard]
 # macOS: picking a clip or emoji also pastes it into the app in front. Default true.
 paste = false
+
+[extensions]
+# Where "Install Extension" lists extensions from. Default tomboy's GitHub repo.
+registry = "https://raw.githubusercontent.com/dzhibas/tomboy/main"
+
+[extensions.hackernews]
+# An extension's preferences, by the ids in its tomboy.toml.
+feed = "show_hn"
 ```
 
 | Setting | Default | What it does |
@@ -192,6 +203,8 @@ paste = false
 | `todo.directory` | `~/Documents/tomboy/todo` | Where the daily todo lists live, see [Todos](#todos). |
 | `hotkeys.launcher` / `clipboard` / `emoji` / `todo` | `alt+space` / `cmd+shift+c` / `ctrl+alt+e` / `ctrl+alt+t` | macOS only: the daemon's global shortcuts (`cmd`, `ctrl`, `alt`, `shift` + a key). `""` turns one off. Read when the daemon starts: run `tomboy install-launch-agent` again to apply. |
 | `clipboard.paste` | `true` | macOS only: after a clip or emoji is picked, paste it into the app in front (needs the Accessibility permission). `false` only copies. |
+| `extensions.registry` | `https://raw.githubusercontent.com/dzhibas/tomboy/main` | Where the extension store reads `extensions/index.json` and files from: an `https://` base, a `file://` URL or a local checkout of tomboy (for forks and testing). |
+| `extensions.<id>.<pref>` | the extension's default | An extension's preference, by the ids in its `tomboy.toml`; see [Extensions](#extensions). |
 
 A file that doesn't parse, or has an unknown key, is ignored as a whole; the footer says why
 (`config.toml ignored: unknown field …`).
@@ -379,6 +392,70 @@ o.rebind("SUPER + CTRL + V", "Tomboy clipboard", "~/.cargo/bin/tomboy clipboard"
 Hyprland reloads the config on save; check it with `hyprctl configerrors`. The window floats
 on its own, like the launcher.
 
+## Extensions
+
+Extensions add commands to tomboy, such as **Hacker News**: type `hn`, pick a story, Enter
+opens it. They come from the [`extensions/`](extensions) folder of this repo.
+
+**Install from inside tomboy.** Type `install extension` or `extensions` and press Enter on
+**Install Extension** (or run `tomboy extensions` to open it directly):
+
+- The store lists **Installed** and **Available** extensions with version and status
+  (`Installed`, `Update 1.1.0`, `Needs a newer tomboy`). Type to filter.
+- The right pane shows the picked one's README, author, licence, commands and permissions in
+  plain words ("Connects to hn.algolia.com").
+- **Enter** on an available extension shows a consent screen with its permissions; Enter
+  installs, Esc cancels. Its commands are in the launcher at once.
+- **Enter** on an installed one opens its first command. **Ctrl/⌘+K** opens the action panel:
+  Update, Uninstall, Disable/Enable, View Source on GitHub, Show Folder.
+- An update that asks for a new permission shows the consent screen again.
+- Offline, the store lists only what is installed and says "Couldn't reach the extension
+  registry". An installed extension that was taken out of the registry is marked
+  `Removed from registry`; uninstalling it is up to you.
+
+Inside an extension: Enter runs the first action, Ctrl/⌘+K shows the rest, Esc goes back.
+
+**From a terminal**, `tomboy ext …` does the same:
+
+| Command | What it does |
+| --- | --- |
+| `tomboy ext list` | Installed extensions |
+| `tomboy ext available` | Extensions in the registry |
+| `tomboy ext install <id> [--yes]` | Install one (asks to accept its permissions) |
+| `tomboy ext update [<id>] [--yes]` | Update one or all |
+| `tomboy ext uninstall <id>` | Remove one |
+| `tomboy ext enable <id>` / `disable <id>` | Turn one on or off |
+| `tomboy ext new` / `dev` / `check` / `index` | For writing extensions, see below |
+
+**Preferences** go in `config.toml` under the extension's id; each extension's README lists
+its own:
+
+```toml
+[extensions.hackernews]
+feed = "show_hn"   # front_page (default), newest, show_hn, ask_hn
+```
+
+**Files**:
+
+| Path | What |
+| --- | --- |
+| `~/.local/share/tomboy/extensions/<id>/` | Installed extensions, as in the repo |
+| `~/.local/share/tomboy/extensions/installed.json` | Version, source, on/off and the permissions you accepted, per extension |
+| `~/.local/state/tomboy/ext/<id>/storage.json` | What an extension saved (`api.storage`) |
+| `~/.cache/tomboy/ext/<id>/` | An extension's cache (`api.cache`); safe to delete |
+| `~/.cache/tomboy/extensions-index.json` | The registry index, cached for an hour |
+
+**Security.** Extensions are Luau scripts in a sandbox: no file or process access, and the
+network only reaches the https hosts the extension declares, which you accept before
+installing. Every extension, and every change to one, is reviewed in a pull request here
+before the store offers it, and installs are checked against the SHA-256 of each file.
+
+**Write one**: `tomboy ext new my-ext`, then `tomboy ext dev my-ext` (Ctrl/⌘+R reloads) and
+`tomboy ext check my-ext`. The guide and API reference are in
+[docs/extensions.md](docs/extensions.md); to publish it, see
+[CONTRIBUTING.md](CONTRIBUTING.md#extensions). Or ask the agent: "make me a tomboy extension
+that lists my GitHub notifications".
+
 ## Build from source
 
 ```sh
@@ -421,6 +498,9 @@ On Omarchy, see [Install on Omarchy](#install-on-omarchy).
 | `src/platform.rs` | Platform detection (Omarchy / generic Linux / macOS) |
 | `src/mac/` | macOS: native pasteboard, paste into the front app, LaunchAgent, system commands |
 | `src/omarchy.rs` | Omarchy menu loading (JSONC), conditions, search, running |
+| `src/ext/` | Extensions: manifest, registry index, install, the Luau runtime and `@tomboy/*` API (`tomboy.luau`), `tomboy ext` CLI |
+| `src/extui.rs` | Extension views, the store, the consent screen and the action panel (Ctrl/⌘+K) |
+| `extensions/` | The extension registry: one folder per extension, and the generated `index.json` |
 
 Type-check the macOS build from Linux (blake3's C code needs the macOS SDK, so use its pure-Rust path).
 This currently stops at `ring` (ureq's TLS), whose C code also needs the SDK; build on a Mac for a full check.
@@ -443,6 +523,6 @@ CC_x86_64_unknown_linux_gnu=clang AR_x86_64_unknown_linux_gnu=ar \
 ```sh
 cargo test
 cargo test live_claude -- --ignored   # runs the real claude CLI (tiny paid request)
-cargo run -- --snap shot.png --scene calc   # scenes: apps calc url web omarchy system chat submenu units time dev kill currency quicklink quicklink-arg alias todo todo-command todo-add
+cargo run -- --snap shot.png --scene calc   # scenes: apps calc url web omarchy system chat submenu units time dev kill currency quicklink quicklink-arg alias todo todo-command todo-add store ext-hackernews
 cargo run -- --tree tree.json --scene apps
 ```

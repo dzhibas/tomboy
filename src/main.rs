@@ -21,6 +21,8 @@ mod clipboard;
 mod config;
 mod dictation;
 mod emoji;
+mod ext;
+mod extui;
 mod frecency;
 #[cfg(target_os = "macos")]
 mod mac;
@@ -166,7 +168,20 @@ struct Tomboy {
     /// The window has had the keyboard since it last showed. Until then a focus loss is
     /// stale (macOS reports one before a new window's first focus) and doesn't close it.
     had_focus: bool,
+    /// Installed, enabled extensions (`ext::install::installed_dirs`), plus `tomboy ext dev`'s.
+    extensions: Vec<(ext::manifest::Manifest, std::path::PathBuf)>,
+    /// A running extension command, while its views are on screen.
+    session: Option<extui::Session>,
+    /// The extension store ("Install Extension"), while it's open.
+    store: Option<extui::Store>,
+    /// The action panel (Ctrl/⌘+K) over an extension view or the store.
+    panel: Option<extui::Panel>,
+    /// `tomboy ext dev <dir>`: open its first command once the window is up.
+    dev_open: bool,
 }
+
+/// `tomboy ext dev <dir>`: the extension folder being developed.
+static DEV_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
 /// Set by `tomboy daemon` before the app starts, for `init`.
 static RESIDENT: AtomicBool = AtomicBool::new(false);
@@ -204,6 +219,14 @@ enum Item {
     TodoAdd(String),
     /// A task in the open list, by its place in `Day::tasks`.
     Task(usize),
+    /// An installed extension's command.
+    Extension { ext: usize, command: usize },
+    /// "Install Extension": the store.
+    Store,
+    /// A row of the open extension list, by its place in the view's items.
+    ExtRow(usize),
+    /// A row of the store, by its place in `extui::store_rows`.
+    StoreRow(usize),
 }
 
 impl Item {
@@ -236,6 +259,9 @@ impl Item {
                 Some(true) => "Mark Open",
                 _ => "Mark Done",
             },
+            Item::Extension { .. } => "Open Command",
+            Item::Store => "Open Extension Store",
+            Item::ExtRow(_) | Item::StoreRow(_) => "",
         }
     }
 }
@@ -276,6 +302,7 @@ fn init() -> Tomboy {
         links: quicklinks::load(&config), quicklink: None,
         todo: None, todo_counts: config.todo_dir().map_or((0, 0), |d| todo::peek(&d, todo::today_date())),
         config, resident, me: None, shown: None, paste: false, had_focus: false,
+        extensions: load_extensions(), session: None, store: None, panel: None, dev_open: DEV_DIR.get().is_some(),
     };
     if rune::extra_args().iter().any(|a| a == "clipboard") {
         enter_clipboard(&mut s);
@@ -286,8 +313,24 @@ fn init() -> Tomboy {
     } else if rune::extra_args().iter().any(|a| a == "todo") {
         enter_todo(&mut s);
         s.direct = true;
+    } else if rune::extra_args().iter().any(|a| a == "extensions") {
+        extui::open_store(&mut s);
+        s.direct = true;
     }
     s
+}
+
+/// The installed extensions, and the one `tomboy ext dev` runs (first, replacing an installed
+/// copy of it).
+fn load_extensions() -> Vec<(ext::manifest::Manifest, std::path::PathBuf)> {
+    let mut exts = ext::install::installed_dirs();
+    if let Some(dir) = DEV_DIR.get() {
+        match ext::manifest::Manifest::load(dir) {
+            Ok(m) => { exts.retain(|(x, _)| x.id != m.id); exts.insert(0, (m, dir.clone())); }
+            Err(e) => eprintln!("tomboy ext dev: {e}"),
+        }
+    }
+    exts
 }
 
 /// Start decoding every app's icon on Rune's image worker and checking the menu's shell
@@ -308,15 +351,22 @@ fn setup(s: &mut Tomboy, waker: Waker) {
         s.conds = omarchy::evaluate(&s.menu, root, move || waker());
     }
     s.wake = waker.clone();
+    if s.dev_open || s.store.is_some() { waker(); }
     s.waker = Some(waker);
     sync_clip_image(s);
 }
 
 /// After every edit: if one change inserted a burst of text, check on a thread whether it
 /// was a Superwhisper dictation (the history entry can land just after the text does).
-fn on_change(s: &mut Tomboy, _: &mut Tx) {
+fn on_change(s: &mut Tomboy, tx: &mut Tx) {
     s.picked = 0;
     s.status = None;
+    s.panel = None;
+    if s.session.is_some() || s.store.is_some() {
+        s.last_text = s.query.text.clone();
+        extui::on_change(s, tx);
+        return;
+    }
     if s.clips.is_some() {
         s.last_text = s.query.text.clone();
         sync_clip_image(s);
@@ -349,8 +399,14 @@ fn on_change(s: &mut Tomboy, _: &mut Tx) {
 
 /// Redraw after a background wake; a confirmed dictation goes straight to the agent instead
 /// of the result list.
-fn poll(s: &mut Tomboy, _: f64, tx: &mut Tx) -> bool {
+fn poll(s: &mut Tomboy, now: f64, tx: &mut Tx) -> bool {
     let woke = s.woke.swap(false, Ordering::AcqRel);
+    if std::mem::take(&mut s.dev_open) && !s.extensions.is_empty() {
+        run_item(s, &Item::Extension { ext: 0, command: 0 }, tx);
+        s.direct = true;
+        return true;
+    }
+    let woke = extui::poll(s, now, tx) || woke;
     let Some(prompt) = s.dictated.lock().unwrap_or_else(|e| e.into_inner()).take() else { return woke };
     if prompt != s.query.text { return woke; } // edited since; treat it as typed
     if chat_running(s) { return woke; }
@@ -359,6 +415,7 @@ fn poll(s: &mut Tomboy, _: f64, tx: &mut Tx) -> bool {
 }
 
 fn results(s: &Tomboy) -> Vec<Item> {
+    if let Some(rows) = extui::session_results(s).or_else(|| extui::store_results(s)) { return rows; }
     let q = s.query.text.trim();
     if let Some(clips) = &s.clips {
         return clipboard::search(clips, q).into_iter().map(Item::Clip).collect();
@@ -410,6 +467,10 @@ fn search(s: &Tomboy, q: &str) -> Vec<Item> {
     if emoji::matches_command(q) {
         items.push(Item::Emoji);
     }
+    items.extend(extui::search(s, q));
+    if extui::store_matches(q) {
+        items.push(Item::Store);
+    }
     items.extend(links.iter().filter(|h| !h.exact).map(link_item));
     let app_limit = if q.is_empty() { MAX_APPS } else { MAX_APP_HITS };
     let app_boost = |i: usize| s.frecency.boost(&frecency::app_key(&s.apps[i].id), q, now);
@@ -439,7 +500,8 @@ fn same_item(a: &Item, b: &Item) -> bool {
     match (a, b) {
         (Item::App(x), Item::App(y)) | (Item::Menu(x), Item::Menu(y)) => x == y,
         (Item::Quicklink { link: x, arg: p }, Item::Quicklink { link: y, arg: q }) => x == y && p == q,
-        (Item::Clipboard, Item::Clipboard) | (Item::Emoji, Item::Emoji) => true,
+        (Item::Clipboard, Item::Clipboard) | (Item::Emoji, Item::Emoji) | (Item::Store, Item::Store) => true,
+        (Item::Extension { ext: a, command: x }, Item::Extension { ext: b, command: y }) => a == b && x == y,
         _ => false,
     }
 }
@@ -457,6 +519,10 @@ fn frecency_key(s: &Tomboy, item: &Item) -> Option<String> {
         Item::App(i) => Some(frecency::app_key(&s.apps[*i].id)),
         Item::Menu(i) if !omarchy::has_children(&s.menu, &s.menu[*i].id) => Some(frecency::menu_key(&s.menu[*i].id)),
         Item::Quicklink { link, arg } if arg.is_some() || s.links[*link].arg.is_none() => Some(frecency::link_key(&s.links[*link].keyword)),
+        Item::Extension { ext, command } => {
+            let m = &s.extensions[*ext].0;
+            Some(extui::frecency_key(&m.id, &m.commands[*command].id))
+        }
         _ => None,
     }
 }
@@ -508,6 +574,10 @@ fn run_item(s: &mut Tomboy, item: &Item, tx: &mut Tx) {
             (Some(_), None) => { enter_quicklink(s, Some(*link)); Ok(After::Stay) }
             (_, arg) => url::open(&s.links[*link].expand(arg.as_deref().unwrap_or(""))).map(|()| After::Quit),
         },
+        Item::Extension { ext, command } => extui::open_command(s, *ext, *command, tx),
+        Item::Store => { extui::open_store(s); Ok(After::Stay) }
+        Item::ExtRow(i) => { extui::run_row(s, *i, tx); Ok(After::Stay) }
+        Item::StoreRow(i) => { extui::run_store_row(s, *i, tx); Ok(After::Stay) }
     };
     if let (Some(key), Ok(_)) = (&key, &outcome) {
         // In argument mode the field holds the argument; learn the keyword instead.
@@ -823,6 +893,9 @@ fn fresh_view(s: &mut Tomboy) {
     s.emoji = None;
     s.todo = None;
     s.quicklink = None;
+    s.session = None;
+    s.store = None;
+    s.panel = None;
     s.direct = false;
     enter_submenu(s, None);
     s.query.focused = true;
@@ -837,6 +910,7 @@ fn reload(s: &mut Tomboy) {
     s.links = quicklinks::load(&config);
     s.todo_counts = config.todo_dir().map_or((0, 0), |d| todo::peek(&d, todo::today_date()));
     s.config = config;
+    s.extensions = load_extensions();
     let apps = apps::load_apps();
     if apps.iter().map(|a| &a.path).ne(s.apps.iter().map(|a| &a.path)) {
         s.icons = apps.iter().map(|a| match (&a.icon, &s.cache) {
@@ -894,6 +968,8 @@ fn encode(q: &str) -> String {
 }
 
 fn submit(s: &mut Tomboy, tx: &mut Tx) {
+    if s.panel.is_some() { extui::run_panel(s, tx); return; }
+    if extui::store_submit(s, tx) { return; }
     if s.emoji.is_some() { copy_emoji(s, tx); return; }
     if s.todo.is_some() && !s.query.text.trim().is_empty() {
         // Typing in the list adds a todo; with the field empty, Enter toggles the picked one.
@@ -921,6 +997,23 @@ fn submit(s: &mut Tomboy, tx: &mut Tx) {
 }
 
 fn on_input_key(s: &mut Tomboy, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    if s.panel.is_some() { return extui::panel_key(s, ev, tx); }
+    if ev.is_command('k') && extui::has_panel_actions(s) { return extui::open_panel(s); }
+    if ev.is_command('r') && DEV_DIR.get().is_some() && s.session.is_some() {
+        // `tomboy ext dev`: reload the folder and run the command again.
+        s.extensions = load_extensions();
+        s.session = None;
+        run_item(s, &Item::Extension { ext: 0, command: 0 }, tx);
+        return true;
+    }
+    if s.session.is_some() && extui::session_key(s, ev, tx) {
+        if s.session.is_none() && s.direct { quit(s, tx); }
+        return true;
+    }
+    if s.store.is_some() && extui::store_key(s, ev, tx) {
+        if s.store.is_none() && s.direct { quit(s, tx); }
+        return true;
+    }
     if let Some(run) = s.chat.clone() {
         match ev.key {
             // Esc stops a running agent; once it is idle, Esc closes tomboy.
@@ -974,12 +1067,14 @@ fn view(s: &Tomboy, cx: &mut Cx<Tomboy>) -> El {
     let accent = tok::accent(0, dark);
 
     let crumb = if s.chat.is_some() { None }
+        else if let Some(c) = extui::crumb(s) { Some(c) }
         else if s.clips.is_some() { Some("Clipboard History".to_string()) }
         else if s.emoji.is_some() { Some("Emoji & Symbols".to_string()) }
         else if s.todo.is_some() { Some(format!("Today {}/{}", s.todo_counts.0, s.todo_counts.1)) }
         else if let Some(l) = s.quicklink { Some(s.links[l].name.clone()) }
         else { submenu_title(s) };
     let placeholder = if s.chat.is_some() { "Ask a follow-up…".to_string() }
+        else if let Some(p) = extui::placeholder(s) { p }
         else if s.clips.is_some() { "Search clipboard…".to_string() }
         else if s.emoji.is_some() { "Search emoji and symbols…".to_string() }
         else if s.todo.is_some() { "Add a todo…".to_string() }
@@ -1002,7 +1097,8 @@ fn view(s: &Tomboy, cx: &mut Cx<Tomboy>) -> El {
         // The open submenu, as a chip; clicking it goes back up.
         header = header.child(row().key("crumb").h(ty::px(28.0)).px(10.0).radius(7.0).center_y().fill(t.control_off)
             .child(text(c).font(ty::label()).color(t.text))
-            .on_press(|s: &mut Tomboy| if s.emoji.is_some() { if !s.direct { leave_emoji(s) } }
+            .on_press(|s: &mut Tomboy| if s.session.is_some() || s.store.is_some() { if !s.direct { s.session = None; s.store = None; s.panel = None; enter_submenu(s, None) } }
+                else if s.emoji.is_some() { if !s.direct { leave_emoji(s) } }
                 else if s.todo.is_some() { if !s.direct { leave_todo(s) } }
                 else if s.clips.is_some() { if !s.direct { leave_clipboard(s) } }
                 else if s.quicklink.is_some() { enter_quicklink(s, None) }
@@ -1012,6 +1108,8 @@ fn view(s: &Tomboy, cx: &mut Cx<Tomboy>) -> El {
 
     let (body, left, action) = match &s.chat {
         Some(run) => chat_body(s, run, dark, &t),
+        None if s.session.is_some() => extui::session_body(s, dark, &t, accent),
+        None if s.store.is_some() => extui::store_body(s, dark, &t, accent),
         None if s.clips.is_some() => clipboard_body(s, &t, accent),
         None if s.emoji.is_some() => emoji_body(s, &t, accent),
         None if s.todo.is_some() => todo_body(s, &t, accent),
@@ -1041,7 +1139,8 @@ fn results_body(s: &Tomboy, t: &tok::Theme, accent: Color) -> (El, String, (&'st
             Item::Menu(_) if s.submenu.is_some() => "Commands",
             Item::Menu(_) => s.platform.name(),
             Item::WebSearch(_) | Item::Agent(_) => "Fallback",
-            Item::Clipboard | Item::Emoji => "Commands",
+            Item::Clipboard | Item::Emoji | Item::Store => "Commands",
+            Item::Extension { .. } => "Extensions",
             Item::Clip(_) => "Clipboard",
             Item::Quicklink { .. } => "Quicklinks",
             Item::Todo | Item::TodoAdd(_) => "Todo",
@@ -1326,6 +1425,15 @@ fn item_row(s: &Tomboy, item: &Item, i: usize, on: bool, t: &tok::Theme, accent:
         Item::TodoAdd(text) => (glyph_in("\u{f0415}", Color { r: 0.20, g: 0.65, b: 0.45, a: 1.0 }, Some(NERD_FONT)), // nf-md-plus
             format!("Add todo: {text}"), Some(format!("to today's list · {}/{} done", s.todo_counts.0, s.todo_counts.1)), "Todo"),
         Item::Task(_) => (glyph("☐", accent), String::new(), None, "Task"), // drawn by `task_row`
+        Item::Extension { ext, command } => {
+            let (g, title, sub, kind) = extui::command_row(s, *ext, *command);
+            (glyph_in(&g, extui::ext_color(), Some(NERD_FONT)), title, sub, leak_kind(kind))
+        }
+        Item::Store => {
+            let (g, title, sub) = extui::store_row_parts();
+            (glyph_in(&g, extui::ext_color(), Some(NERD_FONT)), title, sub, "Command")
+        }
+        Item::ExtRow(_) | Item::StoreRow(_) => (glyph("•", accent), String::new(), None, ""), // drawn by `extui`
         Item::Quicklink { link, arg } => {
             let l = &s.links[*link];
             let (title, sub) = match arg {
@@ -1401,6 +1509,17 @@ fn answer_style(kind: Kind) -> (&'static str, Color, &'static str) {
     }
 }
 
+/// An extension's name as a row's right-hand label (`item_row` takes `&'static str`; names
+/// are few and fixed for the launch).
+fn leak_kind(name: String) -> &'static str {
+    static NAMES: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+    let mut names = NAMES.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(n) = names.iter().find(|n| **n == name) { return n; }
+    let n: &'static str = Box::leak(name.into_boxed_str());
+    names.push(n);
+    n
+}
+
 /// A finished conversation for the headless `chat` scene.
 fn chat_scene(s: &mut Tomboy) {
     let run = agent::Run::demo("claude", &[
@@ -1457,6 +1576,13 @@ fn main() {
             exit_on_error(dir.ok_or_else(|| std::io::Error::other("no home directory"))
                 .and_then(|d| todo::add_cli(&d, &args[2..].join(" "))))
         }
+        Some("ext") if args.get(1).map(String::as_str) == Some("dev") => {
+            let Some(dir) = args.get(2) else { eprintln!("usage: tomboy ext dev <dir>"); std::process::exit(2) };
+            let dir = std::fs::canonicalize(dir).unwrap_or_else(|e| { eprintln!("tomboy ext dev: {dir}: {e}"); std::process::exit(1) });
+            if let Err(e) = ext::runtime::check(&dir) { eprintln!("tomboy ext dev: {e}"); std::process::exit(1) }
+            let _ = DEV_DIR.set(dir);
+        }
+        Some("ext") => std::process::exit(ext::cli::run(&args[1..], &config::load().0.registry())),
         #[cfg(target_os = "macos")]
         Some("daemon") => return run_daemon(),
         #[cfg(target_os = "macos")]
@@ -1554,6 +1680,12 @@ fn spec() -> AppSpec<Tomboy> {
             ("todo", todo_scene),
             ("todo-command", |s| { s.todo_counts = (3, 7); s.query = TextEdit::new("todo"); }),
             ("todo-add", |s| { s.todo_counts = (3, 7); s.query = TextEdit::new("todo buy milk"); }),
+            ("store", |s| extui::store_scene(s, false)),
+            ("store-consent", |s| extui::store_scene(s, true)),
+            ("store-command", |s| s.query = TextEdit::new("install ext")),
+            ("ext-hackernews", extui::hackernews_scene),
+            ("ext-command", extui::command_scene),
+            ("ext-hackernews-panel", |s| { extui::hackernews_scene(s); extui::open_panel(s); }),
         ],
         ..AppSpec::new("tomboy", (WIDTH, HEIGHT), init, view)
     }
@@ -1563,5 +1695,57 @@ fn exit_on_error(r: std::io::Result<()>) -> ! {
     match r {
         Ok(()) => std::process::exit(0),
         Err(e) => { eprintln!("tomboy: {e}"); std::process::exit(1) }
+    }
+}
+
+#[cfg(test)]
+mod extension_flow_tests {
+    use super::*;
+
+    fn key(k: Key) -> KeyEvent { KeyEvent { key: k, mods: Default::default() } }
+
+    #[test]
+    fn store_consent_and_extension_keys() {
+        let mut s = init();
+        let mut tx = Tx::default();
+
+        // Enter on an available extension asks first; Esc cancels and stays in the store.
+        extui::store_scene(&mut s, false);
+        assert!(matches!(results(&s).first(), Some(Item::StoreRow(0))));
+        submit(&mut s, &mut tx);
+        assert!(extui::consent_open(&s));
+        assert!(on_input_key(&mut s, &key(Key::Escape), &mut tx));
+        assert!(!extui::consent_open(&s) && s.store.is_some());
+
+        // The Hacker News sample: its stories are the rows, the field filters them.
+        s.store = None;
+        extui::hackernews_scene(&mut s);
+        assert_eq!(results(&s).len(), 12);
+        s.query = TextEdit::new("rust");
+        s.picked = 0; // as on_change does after an edit
+        assert!((1..12).contains(&results(&s).len()));
+
+        // Ctrl/⌘+K opens the panel, which keeps the keyboard until Esc.
+        assert!(on_input_key(&mut s, &key(Key::Command('k')), &mut tx));
+        assert!(s.panel.is_some());
+        assert!(on_input_key(&mut s, &key(Key::Down), &mut tx));
+        assert_eq!(s.panel.as_ref().map(|p| p.picked), Some(1));
+        assert!(on_input_key(&mut s, &key(Key::Escape), &mut tx));
+        assert!(s.panel.is_none() && s.session.is_some());
+
+        // Esc clears the filter, then leaves the extension.
+        assert!(on_input_key(&mut s, &key(Key::Escape), &mut tx));
+        assert!(s.query.text.is_empty() && s.session.is_some());
+        assert!(on_input_key(&mut s, &key(Key::Escape), &mut tx));
+        assert!(s.session.is_none());
+    }
+
+    #[test]
+    fn launcher_lists_extension_commands_and_the_store() {
+        let mut s = init();
+        extui::command_scene(&mut s);
+        assert!(matches!(results(&s).first(), Some(Item::Extension { ext: 0, command: 0 })));
+        s.query = TextEdit::new("install ext");
+        assert!(results(&s).contains(&Item::Store));
     }
 }
