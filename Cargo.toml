@@ -1,6 +1,6 @@
 [package]
 name = "tomboy"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 description = "A personal Raycast-style launcher built with Rune"
 
@@ -38,3 +38,5 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
 
 [profile.release]
 lto = "thin"
+codegen-units = 1
+strip = "symbols"

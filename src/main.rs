@@ -1,7 +1,7 @@
 //! tomboy — a personal Raycast-style launcher built with Rune.
 //!
 //! Type to search installed applications, evaluate math (`2+2`), or open a URL.
-//! ↑/↓ pick, Enter runs, Esc (or clicking away) closes.
+//! ↑/↓ pick, Enter runs, Esc, Super+W (or clicking away) closes.
 //!
 //! "Ask agent" (or dictating with Superwhisper) runs the coding agent headless and streams
 //! its answer into tomboy; the field then takes follow-ups in the same session.
@@ -999,7 +999,23 @@ fn submit(s: &mut Tomboy, tx: &mut Tx) {
     if let Some(item) = items.get(s.picked).cloned() { run_item(s, &item, tx); }
 }
 
+/// Super+W (or Cmd/Ctrl+W) closes tomboy from any screen.
+fn is_close_chord(ev: &KeyEvent) -> bool {
+    ev.is_command('w') || (ev.mods.logo && matches!(&ev.key, Key::Text(t) if t.eq_ignore_ascii_case("w")))
+}
+
+/// Keys no focused control took (the search field lost focus to a click on the transcript,
+/// say): Esc behaves as it does in the field, and the close chord closes.
+fn on_window_key(s: &mut Tomboy, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    if is_close_chord(ev) { quit(s, tx); return true; }
+    if matches!(ev.key, Key::Escape) || (s.chat.is_some() && matches!(ev.key, Key::PageUp | Key::PageDown)) {
+        return on_input_key(s, ev, tx);
+    }
+    false
+}
+
 fn on_input_key(s: &mut Tomboy, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    if is_close_chord(ev) { quit(s, tx); return true; }
     if s.panel.is_some() { return extui::panel_key(s, ev, tx); }
     if ev.is_command('k') && extui::has_panel_actions(s) { return extui::open_panel(s); }
     if ev.is_command('r') && DEV_DIR.get().is_some() && s.session.is_some() {
@@ -1022,6 +1038,9 @@ fn on_input_key(s: &mut Tomboy, ev: &KeyEvent, tx: &mut Tx) -> bool {
             // Esc stops a running agent; once it is idle, Esc closes tomboy.
             Key::Escape if run.lock().is_running() => run.stop(),
             Key::Escape => quit(s, tx),
+            // Page through a long answer without leaving the field.
+            Key::PageUp => tx.scroll_page("transcript-scroll", -1),
+            Key::PageDown => tx.scroll_page("transcript-scroll", 1),
             _ => return false,
         }
         return true;
@@ -1362,20 +1381,25 @@ fn chat_body(s: &Tomboy, run: &agent::Run, dark: bool, t: &tok::Theme) -> (El, S
         log = log.child(match block {
             Block::Prompt(p) => row().w_full().gap(10.0).padding(10.0).radius(9.0).fill(t.control_off)
                 .child(text("›").font(ty::body()).color(AGENT_COLOR))
-                .child(text(p.clone()).font(ty::body()).color(t.text).wrap().grow(1.0).min_w(0.0)),
+                .child(text(p.clone()).font(ty::body()).color(t.text).wrap().selectable(true).grow(1.0).min_w(0.0)),
+            // Selectable (drag, Ctrl+A, Ctrl+C), with links that open in the browser.
             Block::Text(md_src) => col().w_full()
-                .child(Markdown::new(md_src.trim()).streaming(running && last).render(&md)),
+                .child(Markdown::new(md_src.trim()).streaming(running && last).selectable(true)
+                    .on_link(|s: &mut Tomboy, url: &str| {
+                        if let Err(e) = url::open(url) { s.status = Some(format!("Failed: {e}")); }
+                    })
+                    .render(&md)),
             Block::Tool(summary) => row().w_full().gap(8.0).center_y()
                 .child(text("⚙").font(ty::label()).color(t.text_secondary))
-                .child(text(summary.clone()).font(ty::label().family(Family::Mono)).color(t.text_secondary).truncate()
+                .child(text(summary.clone()).font(ty::label().family(Family::Mono)).color(t.text_secondary).truncate().selectable(true)
                     .grow(1.0).min_w(0.0)),
-            Block::Error(e) => text(e.clone()).font(ty::body()).color(Color { r: 0.95, g: 0.35, b: 0.35, a: 1.0 }).wrap(),
+            Block::Error(e) => text(e.clone()).font(ty::body()).color(Color { r: 0.95, g: 0.35, b: 0.35, a: 1.0 }).wrap().selectable(true),
         });
     }
     if running && !matches!(tr.blocks.last(), Some(Block::Text(_))) {
         log = log.child(text("Thinking…").font(ty::label()).color(t.text_secondary));
     }
-    let body = col().w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: true }).child(log);
+    let body = col().key("transcript-scroll").w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: true }).child(log);
     let state = match &tr.status {
         Status::Running => "Running… (Esc to stop)".to_string(),
         Status::Done { secs, cost_usd: Some(c) } => format!("Done in {secs:.1}s · ${c:.3}"),
@@ -1603,6 +1627,8 @@ fn main() {
         .window_options(WindowOptions { borderless: true, resizable: false, max_size: Some((WIDTH, HEIGHT)), ..Default::default() })
         .float_on_open()
         .on_focus(on_focus)
+        // The compositor closing the window (Hyprland's Super+W) stops a running agent too.
+        .on_close(|s, _| if let Some(run) = &s.chat { run.stop() })
         .run();
 }
 
@@ -1654,6 +1680,7 @@ fn spec() -> AppSpec<Tomboy> {
         families: ("Inter", "ui-monospace"),
         setup: Some(setup),
         poll: Some(poll),
+        on_key: Some(on_window_key),
         scenes: &[
             ("apps", |s| s.query = TextEdit::new("fi")),
             ("calc", |s| s.query = TextEdit::new("(2+2)*10/3")),
@@ -1741,6 +1768,20 @@ mod extension_flow_tests {
         assert!(s.query.text.is_empty() && s.session.is_some());
         assert!(on_input_key(&mut s, &key(Key::Escape), &mut tx));
         assert!(s.session.is_none());
+    }
+
+    /// Esc and Super+W close the conversation even when the search field has lost focus.
+    #[test]
+    fn window_keys_close_from_anywhere() {
+        let mut s = init();
+        let mut tx = Tx::default();
+        chat_scene(&mut s);
+        let logo = |k: Key| KeyEvent { key: k, mods: rune::Mods { logo: true, ..Default::default() } };
+        assert!(on_window_key(&mut s, &key(Key::Escape), &mut tx));
+        assert!(on_window_key(&mut s, &logo(Key::Text("w".into())), &mut tx));
+        assert!(on_window_key(&mut s, &key(Key::Command('w')), &mut tx));
+        assert!(on_window_key(&mut s, &key(Key::PageUp), &mut tx));
+        assert!(!on_window_key(&mut s, &key(Key::Text("w".into())), &mut tx));
     }
 
     #[test]
