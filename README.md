@@ -499,6 +499,8 @@ On Omarchy, see [Install on Omarchy](#install-on-omarchy).
 | `src/config.rs` | `~/.config/tomboy/config.toml`: loading and defaults |
 | `src/skill.md` | What the agent knows about tomboy's config (sent with every agent run) |
 | `src/sys.rs` | OS commands: open URL, clipboard, detached spawn |
+| `src/trace.rs` | Launch profiling (`TOMBOY_TRACE`) |
+| `src/fonts.rs`, `assets/fonts/` | Fonts registered up front (Inter, OFL; the installed JetBrainsMono Nerd Font) |
 | `src/calc.rs` | Expression evaluator |
 | `src/url.rs` | URL detection and opening |
 | `src/platform.rs` | Platform detection (Omarchy / generic Linux / macOS) |
@@ -532,3 +534,41 @@ cargo test live_claude -- --ignored   # runs the real claude CLI (tiny paid requ
 cargo run -- --snap shot.png --scene calc   # scenes: apps calc url web omarchy system chat agent-history agent-history-open submenu units time dev kill currency quicklink quicklink-arg alias todo todo-command todo-add store ext-hackernews
 cargo run -- --tree tree.json --scene apps
 ```
+
+## Profiling a launch
+
+`TOMBOY_TRACE=1` prints a timeline to stderr, from `main` to the process ending: each part of
+`init()` and `setup()`, the first `view()`, the first frames (Rune's update and encode time),
+`on_ready`, the window taking focus, the Omarchy menu conditions finishing, `quit`, and a
+summary of views, `results()` calls and background wakes, total and before the first frame.
+After the first frame it reports only slow work: a view over 4 ms, a `results()` over 1 ms,
+a frame over 8 ms. At exit it also prints Rune's own launch steps (`rune::marks`: event loop,
+window, GPU adapter and device, renderer, fonts, fallback fonts, first frame built, encoded,
+on the GPU), each with the gap since the one before. Unset, it costs one branch per call.
+
+```sh
+TOMBOY_TRACE=1 cargo run --release -- --snap shot.png --scene apps   # headless
+TOMBOY_TRACE=1 TOMBOY_T0=$(date +%s%N) ./target/release/tomboy       # a real window
+```
+
+`TOMBOY_T0` (Unix ns or ms) is when the launch was asked for: times then start there, and the
+first line shows exec → `main`. For the real hotkey path, set both in the key binding and
+give `TOMBOY_TRACE` a file to append to, since a binding's stderr goes nowhere:
+
+```
+bind = SUPER, SPACE, exec, TOMBOY_TRACE=/tmp/tomboy-trace.log TOMBOY_T0=$(date +%s%N) ~/.cargo/bin/tomboy
+```
+
+`TOMBOY_TRACE_QUIT=<ms>` ends the process that long after the first frame, to time real
+windowed launches in a loop:
+
+```sh
+for i in $(seq 10); do TOMBOY_TRACE=1 TOMBOY_TRACE_QUIT=250 TOMBOY_T0=$(date +%s%N) \
+  ./target/release/tomboy 2>&1 | grep 'frame.first.gpu_done'; done
+```
+
+What keeps the first frame fast (each was measured this way; see `docs/plan-performance.md`):
+no fontconfig lookup before it (`src/fonts.rs`), no character in U+2100–2BFF on the launcher
+(Rune loads the system's math fonts for any of them, even ones Inter has: use a Nerd Font
+glyph), `rune::warm_gpu` at the top of `main` (on Linux `prewarm_gpu` does nothing), and
+nothing that forks before it (the Omarchy menu conditions wait for it).

@@ -24,6 +24,7 @@ mod dictation;
 mod emoji;
 mod ext;
 mod extui;
+mod fonts;
 mod frecency;
 #[cfg(target_os = "macos")]
 mod mac;
@@ -34,6 +35,7 @@ mod platform;
 mod quicklinks;
 mod sys;
 mod todo;
+mod trace;
 mod url;
 
 use rune::tok::{self, type_};
@@ -283,36 +285,42 @@ enum After {
 }
 
 fn init() -> Tomboy {
-    let (config, config_error) = config::load();
-    let frecency = if config.frecency() { frecency::Store::load() } else { frecency::Store::off() };
+    let started = std::time::Instant::now();
+    let (config, config_error) = trace::span("init: config::load", config::load);
+    let frecency = trace::span("init: frecency", || if config.frecency() { frecency::Store::load() } else { frecency::Store::off() });
     ty::set_scale(config.font_scale());
     let status = config_error.or_else(|| config.warning());
     let mut query = TextEdit::new("");
     query.focused = true;
-    let apps = apps::load_apps();
-    let platform = platform::detect();
+    let apps = trace::span("init: apps::load_apps", apps::load_apps);
+    let platform = trace::span("init: platform::detect", platform::detect);
     let resident = RESIDENT.load(Ordering::Relaxed);
-    let menu = match &platform {
+    let menu = trace::span("init: menu", || match &platform {
         Platform::Omarchy { root } => omarchy::load(root),
         #[cfg(target_os = "macos")]
         Platform::MacOS => mac::menu::items(resident),
         _ => Vec::new(),
-    };
+    });
     // Omarchy's conditions run in `setup`; the macOS commands have none, so all show at once.
     let conds = match &platform {
         Platform::MacOS => omarchy::evaluate(&menu, std::path::Path::new("/"), || {}),
         _ => Conditions::default(),
     };
+    let links = trace::span("init: quicklinks::load", || quicklinks::load(&config));
+    let todo_counts = trace::span("init: todo::peek", || config.todo_dir().map_or((0, 0), |d| todo::peek(&d, todo::today_date())));
+    let extensions = trace::span("init: load_extensions", load_extensions);
+    let seed = trace::span("init: devtools::session_seed", answers::devtools::session_seed);
+    if trace::on() { trace::mark(&format!("init: {} apps, {} menu rows, {} extensions", apps.len(), menu.len(), extensions.len())); }
     let mut s = Tomboy {
         query, picked: 0, icons: vec![None; apps.len()], apps, cache: None,
         platform, menu, conds, status,
         last_text: String::new(), dictated: Arc::default(), waker: None, woke: Arc::default(), chat: None, history: None, submenu: None,
-        seed: answers::devtools::session_seed(), wake: Arc::new(|| {}),
+        seed, wake: Arc::new(|| {}),
         clips: None, direct: false, emoji: None, clip_image: None, frecency,
-        links: quicklinks::load(&config), quicklink: None,
-        todo: None, todo_counts: config.todo_dir().map_or((0, 0), |d| todo::peek(&d, todo::today_date())),
+        links, quicklink: None,
+        todo: None, todo_counts,
         config, resident, me: None, shown: None, paste: false, had_focus: false,
-        extensions: load_extensions(), session: None, store: None, panel: None, dev_open: DEV_DIR.get().is_some(),
+        extensions, session: None, store: None, panel: None, dev_open: DEV_DIR.get().is_some(),
     };
     if rune::extra_args().iter().any(|a| a == "clipboard") {
         enter_clipboard(&mut s);
@@ -330,6 +338,7 @@ fn init() -> Tomboy {
         extui::open_store(&mut s);
         s.direct = true;
     }
+    trace::since("init (total)", started);
     s
 }
 
@@ -346,27 +355,56 @@ fn load_extensions() -> Vec<(ext::manifest::Manifest, std::path::PathBuf)> {
     exts
 }
 
+/// Opens once the window's first frame is encoded, for work that would slow that frame down
+/// (`omarchy::evaluate_gated`). Waiters give up waiting after `LIMIT`, so a window that never
+/// draws (hidden, headless without frames) still gets its work done.
+mod first_frame {
+    use std::sync::{Condvar, Mutex};
+    use std::time::Duration;
+
+    const LIMIT: Duration = Duration::from_millis(500);
+    static OPEN: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
+
+    pub fn open() {
+        let mut open = OPEN.0.lock().unwrap_or_else(|e| e.into_inner());
+        if !*open { *open = true; OPEN.1.notify_all(); }
+    }
+
+    pub fn wait() {
+        let open = OPEN.0.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = OPEN.1.wait_timeout_while(open, LIMIT, |open| !*open);
+    }
+
+    /// For `App::on_frame_encoded`.
+    pub fn on_frame(f: &rune::FrameEncoded) {
+        crate::trace::frame(f);
+        if f.outcome() == rune::FrameOutcome::Drawn { open(); }
+    }
+}
+
 /// Start decoding every app's icon on Rune's image worker and checking the menu's shell
-/// conditions on a background pool; each result wakes the window.
+/// conditions on a background pool (after the first frame); each result wakes the window.
 fn setup(s: &mut Tomboy, waker: Waker) {
+    let started = std::time::Instant::now();
     let woke = s.woke.clone();
     let waker: Waker = match s.me.clone() {
         // A shown launcher panel (the daemon's) redraws only for an update that changed
         // something, never for a bare wake, so wake it with one.
-        Some(me) => Arc::new(move || { woke.store(true, Ordering::Release); me.update_if(|_, _| true) }),
-        None => Arc::new(move || { woke.store(true, Ordering::Release); waker() }),
+        Some(me) => Arc::new(move || { trace::wake(); woke.store(true, Ordering::Release); me.update_if(|_, _| true) }),
+        None => Arc::new(move || { trace::wake(); woke.store(true, Ordering::Release); waker() }),
     };
     let cache = ImageCache::new(waker.clone());
-    s.icons = s.apps.iter().map(|a| a.icon.as_ref().map(|_| cache.app_icon(&a.path, ICON))).collect();
+    s.icons = trace::span("setup: request app icons", || s.apps.iter().map(|a| a.icon.as_ref().map(|_| cache.app_icon(&a.path, ICON))).collect());
     s.cache = Some(cache);
     if let Platform::Omarchy { root } = &s.platform {
         let waker = waker.clone();
-        s.conds = omarchy::evaluate(&s.menu, root, move || waker());
+        s.conds = omarchy::evaluate_gated(&s.menu, root, first_frame::wait, move || waker());
     }
     s.wake = waker.clone();
     if s.dev_open || s.store.is_some() { waker(); }
     s.waker = Some(waker);
     sync_clip_image(s);
+    trace::since("setup (total)", started);
 }
 
 /// After every edit: if one change inserted a burst of text, check on a thread whether it
@@ -432,6 +470,13 @@ fn poll(s: &mut Tomboy, now: f64, tx: &mut Tx) -> bool {
 }
 
 fn results(s: &Tomboy) -> Vec<Item> {
+    let started = std::time::Instant::now();
+    let rows = search_results(s);
+    trace::results(started, rows.len());
+    rows
+}
+
+fn search_results(s: &Tomboy) -> Vec<Item> {
     if let Some(rows) = extui::session_results(s).or_else(|| extui::store_results(s)) { return rows; }
     let q = s.query.text.trim();
     if let Some(clips) = &s.clips {
@@ -945,6 +990,7 @@ fn chat_running(s: &Tomboy) -> bool {
 /// Quit, stopping a running agent first (it runs in its own process group). The daemon
 /// hides instead, ready for the next hotkey.
 fn quit(s: &mut Tomboy, tx: &mut Tx) {
+    trace::mark("quit");
     if let Some(run) = &s.chat { run.stop(); }
     if s.resident { hide(s) } else { tx.quit() }
 }
@@ -1172,6 +1218,13 @@ fn on_input_key(s: &mut Tomboy, ev: &KeyEvent, tx: &mut Tx) -> bool {
 }
 
 fn view(s: &Tomboy, cx: &mut Cx<Tomboy>) -> El {
+    let started = std::time::Instant::now();
+    let el = build_view(s, cx);
+    trace::view(started);
+    el
+}
+
+fn build_view(s: &Tomboy, cx: &mut Cx<Tomboy>) -> El {
     let dark = cx.system_dark();
     let t = tok::theme(dark);
     let accent = tok::accent(0, dark);
@@ -1202,7 +1255,9 @@ fn view(s: &Tomboy, cx: &mut Cx<Tomboy>) -> El {
     let glyph = if s.chat.is_some() {
         text(AGENT_GLYPH).font(ty::title().family(NERD_FONT)).color(AGENT_COLOR)
     } else {
-        text("⌕").font(ty::title()).color(t.text_secondary)
+        // nf-md-magnify: a Nerd Font glyph, since Inter lacks ⌕ and drawing that loaded the
+        // system's math and symbol fonts inside the first frame (~12 ms).
+        text("\u{f0349}").font(ty::title().family(NERD_FONT)).color(t.text_secondary)
     };
     let mut header = row().h(ty::px(60.0)).px(20.0).gap(14.0).center_y().child(glyph);
     if let Some(c) = crumb {
@@ -1577,8 +1632,11 @@ fn past_row(saved: &agent_history::Saved, i: usize, on: bool, now: i64, t: &tok:
 }
 
 fn keycap(label: &str, t: &tok::Theme) -> El {
+    // ↵ as nf-md-keyboard_return: any character in U+2100–2BFF makes Rune load the system's
+    // math fonts (a fontconfig scan, ~12 ms) inside the first frame, even one Inter has.
+    let (label, font) = if label == "↵" { ("\u{f0311}", ty::label().family(NERD_FONT)) } else { (label, ty::label()) };
     row().h(ty::px(20.0)).min_w(ty::px(22.0)).px(6.0).radius(5.0).center().fill(t.control_off)
-        .child(text(label.to_string()).font(ty::label()).color(t.text))
+        .child(text(label.to_string()).font(font).color(t.text))
 }
 
 fn item_row(s: &Tomboy, item: &Item, i: usize, on: bool, t: &tok::Theme, accent: Color) -> El {
@@ -1594,7 +1652,7 @@ fn item_row(s: &Tomboy, item: &Item, i: usize, on: bool, t: &tok::Theme, accent:
         }
         Item::Url(u) => (glyph("↗", Color { r: 0.2, g: 0.5, b: 1.0, a: 1.0 }), u.clone(), None, "Open URL"),
         Item::Agent(q) => (glyph_in(AGENT_GLYPH, AGENT_COLOR, Some(NERD_FONT)), format!("Ask agent: “{q}”"), None, "Agent"),
-        Item::WebSearch(q) => (glyph("⌕", Color { r: 0.45, g: 0.45, b: 0.5, a: 1.0 }),
+        Item::WebSearch(q) => (glyph_in("\u{f0349}", Color { r: 0.45, g: 0.45, b: 0.5, a: 1.0 }, Some(NERD_FONT)), // nf-md-magnify
             format!("Search the web for “{q}”"), None, "DuckDuckGo"),
         Item::Emoji => (glyph_in("\u{f0c79}", Color { r: 0.98, g: 0.70, b: 0.15, a: 1.0 }, Some(NERD_FONT)), // nf-md-emoticon_happy
             "Emoji & Symbols".into(), Some("Search emoji and symbols; Enter copies".into()), "Command"),
@@ -1786,6 +1844,7 @@ fn demo_links(s: &mut Tomboy) {
 }
 
 fn main() {
+    trace::start();
     // Headless subcommands that record the clipboard history; no window.
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -1815,19 +1874,30 @@ fn main() {
         _ => {}
     }
     rune::set_app_id("tomboy");
+    // macOS: device and pipelines on a thread. Linux: `prewarm_gpu` does nothing there, and
+    // `warm_gpu` is its equivalent, so the window's first frame doesn't wait ~40 ms for them.
     rune::prewarm_gpu();
+    #[cfg(not(target_os = "macos"))]
+    rune::warm_gpu(Default::default());
+    // Read the font files while the GPU warms, before Rune builds the text system.
+    fonts::spec();
+    trace::mark("gpu warm-up started; building app");
     App::new(spec())
         .window_options(WindowOptions { borderless: true, resizable: false, max_size: Some((WIDTH, HEIGHT)), ..Default::default() })
         .float_on_open()
         .on_focus(on_focus)
         // The compositor closing the window (Hyprland's Super+W) stops a running agent too.
         .on_close(|s, _| if let Some(run) = &s.chat { run.stop() })
+        .on_frame_encoded(first_frame::on_frame)
+        .on_ready(|_| trace::mark("on_ready (first frame on the GPU)"))
         .run();
+    trace::mark("event loop exited");
+    trace::summary();
 }
 
 /// Clicking away closes the launcher (hides the daemon's), but not while a conversation is open.
 fn on_focus(s: &mut Tomboy, focused: bool, tx: &mut Tx) {
-    if focused { s.had_focus = true; return; }
+    if focused { trace::first("window focused"); s.had_focus = true; return; }
     if s.had_focus && s.chat.is_none() { quit(s, tx) }
 }
 
@@ -1856,7 +1926,9 @@ fn run_daemon() {
             visible: false, borderless: true, transparent: true, resizable: false,
             min_size: Some((WIDTH, HEIGHT)), max_size: Some((WIDTH, HEIGHT)), ..Default::default()
         })
-        .on_focus(on_focus);
+        .on_focus(on_focus)
+        .on_frame_encoded(first_frame::on_frame)
+        .on_ready(|_| trace::mark("on_ready (first frame on the GPU)"));
     let me = app.handle();
     app = app.init(move || Tomboy { me: Some(me), ..init() });
     for hotkey in Hotkey::ALL {
@@ -1869,8 +1941,10 @@ fn run_daemon() {
 fn spec() -> AppSpec<Tomboy> {
     AppSpec {
         min_size: Some((WIDTH, HEIGHT)),
-        // Code in agent answers uses the system monospace font (fontconfig's `monospace`).
-        families: ("Inter", "ui-monospace"),
+        // Code in agent answers uses the mono family: the Nerd Font when `fonts` found it,
+        // else the system monospace (fontconfig's `monospace`).
+        fonts: fonts::spec().0,
+        families: fonts::spec().1,
         setup: Some(setup),
         poll: Some(poll),
         on_key: Some(on_window_key),

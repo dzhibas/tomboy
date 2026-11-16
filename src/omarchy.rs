@@ -155,7 +155,16 @@ impl Conditions {
 
 /// Rows without conditions are visible at once; the rest are evaluated on a few threads,
 /// calling `wake` as results land so the window redraws.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 pub fn evaluate(items: &[MenuItem], root: &Path, wake: impl Fn() + Send + Sync + 'static) -> Conditions {
+    evaluate_gated(items, root, || {}, wake)
+}
+
+/// `evaluate`, its checks starting once `gate` returns (on a thread of their own). The launcher
+/// holds them until its first frame: each check forks `bash`, and forking a process this size
+/// on 8 threads at once slowed the first frame by ~40 ms (`TOMBOY_TRACE`).
+pub fn evaluate_gated(items: &[MenuItem], root: &Path, gate: impl FnOnce() + Send + 'static,
+    wake: impl Fn() + Send + Sync + 'static) -> Conditions {
     let states: Vec<AtomicU8> = items.iter()
         .map(|it| AtomicU8::new(if it.has_visibility_check() || it.checked.is_some() { PENDING } else { SHOWN }))
         .collect();
@@ -163,22 +172,30 @@ pub fn evaluate(items: &[MenuItem], root: &Path, wake: impl Fn() + Send + Sync +
     let jobs: Arc<Vec<(usize, MenuItem)>> = Arc::new(items.iter().cloned().enumerate()
         .filter(|(_, it)| it.has_visibility_check() || it.checked.is_some()).collect());
     if jobs.is_empty() { return conds; }
-    let next = Arc::new(AtomicUsize::new(0));
     let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
     let path = shell_path(root);
-    for _ in 0..8.min(jobs.len()) {
-        let (jobs, next, conds, wake, path) = (jobs.clone(), next.clone(), conds.clone(), wake.clone(), path.clone());
-        std::thread::spawn(move || loop {
-            let n = next.fetch_add(1, Ordering::Relaxed);
-            let Some((i, it)) = jobs.get(n) else { break };
-            let shown = it.when.as_deref().is_none_or(|c| check(c, &path))
-                && !it.disabled.as_deref().is_some_and(|c| check(c, &path));
-            let mut state = if shown { SHOWN } else { HIDDEN };
-            if shown && it.checked.as_deref().is_some_and(|c| check(c, &path)) { state |= CHECKED; }
-            conds.0[*i].store(state, Ordering::Relaxed);
-            if shown { wake(); }
-        });
-    }
+    let pool = conds.clone();
+    std::thread::spawn(move || {
+        gate();
+        crate::trace::mark("menu conditions start");
+        let (next, done, started) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)), std::time::Instant::now());
+        for _ in 0..8.min(jobs.len()) {
+            let (jobs, next, conds, wake, path, done) = (jobs.clone(), next.clone(), pool.clone(), wake.clone(), path.clone(), done.clone());
+            std::thread::spawn(move || loop {
+                let n = next.fetch_add(1, Ordering::Relaxed);
+                let Some((i, it)) = jobs.get(n) else { break };
+                let shown = it.when.as_deref().is_none_or(|c| check(c, &path))
+                    && !it.disabled.as_deref().is_some_and(|c| check(c, &path));
+                let mut state = if shown { SHOWN } else { HIDDEN };
+                if shown && it.checked.as_deref().is_some_and(|c| check(c, &path)) { state |= CHECKED; }
+                conds.0[*i].store(state, Ordering::Relaxed);
+                if shown { wake(); }
+                if done.fetch_add(1, Ordering::Relaxed) + 1 == jobs.len() {
+                    crate::trace::since(&format!("menu conditions done ({} shell checks)", jobs.len()), started);
+                }
+            });
+        }
+    });
     conds
 }
 
