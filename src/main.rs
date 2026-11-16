@@ -14,6 +14,7 @@
 //!   cargo run -- --tree tree.json --scene apps
 
 mod agent;
+mod agent_history;
 mod answers;
 mod apps;
 mod calc;
@@ -128,6 +129,9 @@ struct Tomboy {
     woke: Arc<AtomicBool>,
     /// The agent conversation; while it exists tomboy shows it instead of search results.
     chat: Option<agent::Run>,
+    /// Past agent conversations ("Agent History"), newest first, while the list is open. A
+    /// conversation opened from it shows over the list, and Esc comes back to it.
+    history: Option<Vec<agent_history::Saved>>,
     /// The Omarchy submenu being browsed (`install`, `appearance.top-bar`); `None` at the root.
     submenu: Option<String>,
     /// Random bytes for this launch, so `uuid`/`password` answers hold still while typing.
@@ -227,6 +231,10 @@ enum Item {
     ExtRow(usize),
     /// A row of the store, by its place in `extui::store_rows`.
     StoreRow(usize),
+    /// "Agent History" in the launcher.
+    AgentHistory,
+    /// A past conversation in the history, by its place in `Tomboy::history`.
+    Past(usize),
 }
 
 impl Item {
@@ -261,6 +269,8 @@ impl Item {
             },
             Item::Extension { .. } => "Open Command",
             Item::Store => "Open Extension Store",
+            Item::AgentHistory => "Open Agent History",
+            Item::Past(_) => "Open Conversation",
             Item::ExtRow(_) | Item::StoreRow(_) => "",
         }
     }
@@ -296,7 +306,7 @@ fn init() -> Tomboy {
     let mut s = Tomboy {
         query, picked: 0, icons: vec![None; apps.len()], apps, cache: None,
         platform, menu, conds, status,
-        last_text: String::new(), dictated: Arc::default(), waker: None, woke: Arc::default(), chat: None, submenu: None,
+        last_text: String::new(), dictated: Arc::default(), waker: None, woke: Arc::default(), chat: None, history: None, submenu: None,
         seed: answers::devtools::session_seed(), wake: Arc::new(|| {}),
         clips: None, direct: false, emoji: None, clip_image: None, frecency,
         links: quicklinks::load(&config), quicklink: None,
@@ -312,6 +322,9 @@ fn init() -> Tomboy {
         s.direct = true;
     } else if rune::extra_args().iter().any(|a| a == "todo") {
         enter_todo(&mut s);
+        s.direct = true;
+    } else if rune::extra_args().iter().any(|a| a == "agents") {
+        enter_history(&mut s);
         s.direct = true;
     } else if rune::extra_args().iter().any(|a| a == "extensions") {
         extui::open_store(&mut s);
@@ -372,6 +385,10 @@ fn on_change(s: &mut Tomboy, tx: &mut Tx) {
         sync_clip_image(s);
         return;
     }
+    if s.history.is_some() && s.chat.is_none() {
+        s.last_text = s.query.text.clone();
+        return;
+    }
     if s.emoji.is_some() {
         s.last_text = s.query.text.clone();
         rebuild_emoji(s);
@@ -420,6 +437,9 @@ fn results(s: &Tomboy) -> Vec<Item> {
     if let Some(clips) = &s.clips {
         return clipboard::search(clips, q).into_iter().map(Item::Clip).collect();
     }
+    if let (Some(past), None) = (&s.history, &s.chat) {
+        return agent_history::search(past, q).into_iter().map(Item::Past).collect();
+    }
     if s.emoji.is_some() { return Vec::new(); } // the picker draws its own grid
     if let Some(day) = &s.todo { return (0..day.tasks().len()).map(Item::Task).collect(); }
     if let Some(id) = &s.submenu {
@@ -467,6 +487,9 @@ fn search(s: &Tomboy, q: &str) -> Vec<Item> {
     if emoji::matches_command(q) {
         items.push(Item::Emoji);
     }
+    if agent_history::matches_command(q) {
+        items.push(Item::AgentHistory);
+    }
     // Typed: extension commands rank with the other commands. Empty: they follow your apps.
     let ext_items = extui::search(s, q);
     let ext_items = if q.is_empty() { Some(ext_items) } else { items.extend(ext_items); None };
@@ -503,7 +526,8 @@ fn same_item(a: &Item, b: &Item) -> bool {
     match (a, b) {
         (Item::App(x), Item::App(y)) | (Item::Menu(x), Item::Menu(y)) => x == y,
         (Item::Quicklink { link: x, arg: p }, Item::Quicklink { link: y, arg: q }) => x == y && p == q,
-        (Item::Clipboard, Item::Clipboard) | (Item::Emoji, Item::Emoji) | (Item::Store, Item::Store) => true,
+        (Item::Clipboard, Item::Clipboard) | (Item::Emoji, Item::Emoji) | (Item::Store, Item::Store)
+        | (Item::AgentHistory, Item::AgentHistory) => true,
         (Item::Extension { ext: a, command: x }, Item::Extension { ext: b, command: y }) => a == b && x == y,
         _ => false,
     }
@@ -581,6 +605,8 @@ fn run_item(s: &mut Tomboy, item: &Item, tx: &mut Tx) {
         Item::Store => { extui::open_store(s); Ok(After::Stay) }
         Item::ExtRow(i) => { extui::run_row(s, *i, tx); Ok(After::Stay) }
         Item::StoreRow(i) => { extui::run_store_row(s, *i, tx); Ok(After::Stay) }
+        Item::AgentHistory => { enter_history(s); Ok(After::Stay) }
+        Item::Past(i) => { open_past(s, *i); Ok(After::Stay) }
     };
     if let (Some(key), Ok(_)) = (&key, &outcome) {
         // In argument mode the field holds the argument; learn the keyword instead.
@@ -619,6 +645,64 @@ fn ask_agent(s: &mut Tomboy, prompt: &str) -> std::io::Result<After> {
     s.picked = 0;
     s.status = None;
     Ok(After::Stay)
+}
+
+/// Browse the past agent conversations, read fresh from disk.
+fn enter_history(s: &mut Tomboy) {
+    s.history = Some(agent_history::load());
+    s.chat = None;
+    s.query.clear();
+    s.last_text.clear();
+    s.picked = 0;
+    s.status = None;
+}
+
+fn leave_history(s: &mut Tomboy) {
+    s.history = None;
+    enter_submenu(s, s.submenu.clone());
+}
+
+/// Make past conversation `i` the live one, ready for a follow-up.
+fn open_past(s: &mut Tomboy, i: usize) {
+    let Some(saved) = s.history.as_ref().and_then(|h| h.get(i)).cloned() else { return };
+    s.chat = Some(agent::Run::resume(saved));
+    s.query.clear();
+    s.last_text.clear();
+    s.picked = 0;
+    s.status = None;
+}
+
+/// From a conversation opened in the history back to the list (stopping a running turn),
+/// with the list read again so that conversation's new turns show and it moves to the top.
+fn back_to_history(s: &mut Tomboy) {
+    if let Some(run) = s.chat.take() { run.stop(); }
+    enter_history(s);
+}
+
+/// Delete the picked past conversation.
+fn remove_past(s: &mut Tomboy) {
+    let Some(Item::Past(i)) = results(s).get(s.picked).cloned() else { return };
+    let Some(past) = s.history.as_mut() else { return };
+    let saved = past.remove(i);
+    match agent_history::remove(&saved.id) {
+        Ok(()) => s.status = Some(format!("Deleted “{}”", saved.title())),
+        Err(e) => { s.status = Some(format!("Failed: {e}")); past.insert(i, saved); }
+    }
+    let n = results(s).len();
+    s.picked = s.picked.min(n.saturating_sub(1));
+}
+
+/// Esc, Backspace and Delete in the history list (arrows and Enter work as in any list).
+fn history_key_event(s: &mut Tomboy, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    let empty = s.query.text.is_empty();
+    match ev.key {
+        Key::Escape if !empty => { s.query.clear(); s.last_text.clear(); s.picked = 0; }
+        Key::Escape if s.direct => quit(s, tx),
+        Key::Escape | Key::Backspace if empty && !s.direct => leave_history(s),
+        Key::Delete if empty => remove_past(s),
+        _ => return false,
+    }
+    true
 }
 
 /// Browse the clipboard history, read fresh from disk.
@@ -891,6 +975,7 @@ fn hide(s: &mut Tomboy) {
 /// Back to an empty launcher: no open list, picker, submenu or conversation.
 fn fresh_view(s: &mut Tomboy) {
     s.chat = None;
+    s.history = None;
     s.clips = None;
     s.clip_image = None;
     s.emoji = None;
@@ -1037,6 +1122,8 @@ fn on_input_key(s: &mut Tomboy, ev: &KeyEvent, tx: &mut Tx) -> bool {
         match ev.key {
             // Esc stops a running agent; once it is idle, Esc closes tomboy.
             Key::Escape if run.lock().is_running() => run.stop(),
+            // Opened from the history: back to the list.
+            Key::Escape if s.history.is_some() => back_to_history(s),
             Key::Escape => quit(s, tx),
             // Page through a long answer without leaving the field.
             Key::PageUp => tx.scroll_page("transcript-scroll", -1),
@@ -1047,6 +1134,7 @@ fn on_input_key(s: &mut Tomboy, ev: &KeyEvent, tx: &mut Tx) -> bool {
     }
     if s.emoji.is_some() { return emoji_key_event(s, ev, tx); }
     if s.todo.is_some() && todo_key_event(s, ev, tx) { return true; }
+    if s.history.is_some() && history_key_event(s, ev, tx) { return true; }
     let n = results(s).len();
     match ev.key {
         Key::Down if n > 0 => s.picked = (s.picked + 1) % n,
@@ -1088,7 +1176,8 @@ fn view(s: &Tomboy, cx: &mut Cx<Tomboy>) -> El {
     let t = tok::theme(dark);
     let accent = tok::accent(0, dark);
 
-    let crumb = if s.chat.is_some() { None }
+    let crumb = if s.chat.is_some() { s.history.is_some().then(|| "Agent History".to_string()) }
+        else if s.history.is_some() { Some("Agent History".to_string()) }
         else if let Some(c) = extui::crumb(s) { Some(c) }
         else if s.clips.is_some() { Some("Clipboard History".to_string()) }
         else if s.emoji.is_some() { Some("Emoji & Symbols".to_string()) }
@@ -1097,6 +1186,7 @@ fn view(s: &Tomboy, cx: &mut Cx<Tomboy>) -> El {
         else { submenu_title(s) };
     let placeholder = if s.chat.is_some() { "Ask a follow-up…".to_string() }
         else if let Some(p) = extui::placeholder(s) { p }
+        else if s.history.is_some() { "Search agent conversations…".to_string() }
         else if s.clips.is_some() { "Search clipboard…".to_string() }
         else if s.emoji.is_some() { "Search emoji and symbols…".to_string() }
         else if s.todo.is_some() { "Add a todo…".to_string() }
@@ -1119,7 +1209,9 @@ fn view(s: &Tomboy, cx: &mut Cx<Tomboy>) -> El {
         // The open submenu, as a chip; clicking it goes back up.
         header = header.child(row().key("crumb").h(ty::px(28.0)).px(10.0).radius(7.0).center_y().fill(t.control_off)
             .child(text(c).font(ty::label()).color(t.text))
-            .on_press(|s: &mut Tomboy| if s.session.is_some() || s.store.is_some() { if !s.direct { s.session = None; s.store = None; s.panel = None; enter_submenu(s, None) } }
+            .on_press(|s: &mut Tomboy| if s.chat.is_some() { back_to_history(s) }
+                else if s.history.is_some() { if !s.direct { leave_history(s) } }
+                else if s.session.is_some() || s.store.is_some() { if !s.direct { s.session = None; s.store = None; s.panel = None; enter_submenu(s, None) } }
                 else if s.emoji.is_some() { if !s.direct { leave_emoji(s) } }
                 else if s.todo.is_some() { if !s.direct { leave_todo(s) } }
                 else if s.clips.is_some() { if !s.direct { leave_clipboard(s) } }
@@ -1132,6 +1224,7 @@ fn view(s: &Tomboy, cx: &mut Cx<Tomboy>) -> El {
         Some(run) => chat_body(s, run, dark, &t),
         None if s.session.is_some() => extui::session_body(s, dark, &t, accent),
         None if s.store.is_some() => extui::store_body(s, dark, &t, accent),
+        None if s.history.is_some() => history_body(s, dark, &t, accent),
         None if s.clips.is_some() => clipboard_body(s, &t, accent),
         None if s.emoji.is_some() => emoji_body(s, &t, accent),
         None if s.todo.is_some() => todo_body(s, &t, accent),
@@ -1375,32 +1468,11 @@ fn chat_body(s: &Tomboy, run: &agent::Run, dark: bool, t: &tok::Theme) -> (El, S
     let tr = run.lock();
     let md = ty::markdown(dark);
     let running = tr.is_running();
-    let mut log = col().key("transcript").w_full().px(20.0).py(14.0).gap(10.0);
-    for (i, block) in tr.blocks.iter().enumerate() {
-        let last = i + 1 == tr.blocks.len();
-        log = log.child(match block {
-            Block::Prompt(p) => row().w_full().gap(10.0).padding(10.0).radius(9.0).fill(t.control_off)
-                .child(text("›").font(ty::body()).color(AGENT_COLOR))
-                .child(text(p.clone()).font(ty::body()).color(t.text).wrap().selectable(true).grow(1.0).min_w(0.0)),
-            // Selectable (drag, Ctrl+A, Ctrl+C), with links that open in the browser.
-            Block::Text(md_src) => col().w_full()
-                .child(Markdown::new(md_src.trim()).streaming(running && last).selectable(true)
-                    .on_link(|s: &mut Tomboy, url: &str| {
-                        if let Err(e) = url::open(url) { s.status = Some(format!("Failed: {e}")); }
-                    })
-                    .render(&md)),
-            Block::Tool(summary) => row().w_full().gap(8.0).center_y()
-                .child(text("⚙").font(ty::label()).color(t.text_secondary))
-                .child(text(summary.clone()).font(ty::label().family(Family::Mono)).color(t.text_secondary).truncate().selectable(true)
-                    .grow(1.0).min_w(0.0)),
-            Block::Error(e) => text(e.clone()).font(ty::body()).color(Color { r: 0.95, g: 0.35, b: 0.35, a: 1.0 }).wrap().selectable(true),
-        });
-    }
-    if running && !matches!(tr.blocks.last(), Some(Block::Text(_))) {
-        log = log.child(text("Thinking…").font(ty::label()).color(t.text_secondary));
-    }
+    let log = transcript_log(&tr.blocks, running, &md, t);
     let body = col().key("transcript-scroll").w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: true }).child(log);
     let state = match &tr.status {
+        Status::Idle if s.history.is_some() => format!("{} · Esc to go back", agent_history::ago(tr.created, agent_history::now())),
+        Status::Idle => "Ready".to_string(),
         Status::Running => "Running… (Esc to stop)".to_string(),
         Status::Done { secs, cost_usd: Some(c) } => format!("Done in {secs:.1}s · ${c:.3}"),
         Status::Done { secs, cost_usd: None } => format!("Done in {secs:.1}s"),
@@ -1412,6 +1484,96 @@ fn chat_body(s: &Tomboy, run: &agent::Run, dark: bool, t: &tok::Theme) -> (El, S
         else if s.query.text.trim().is_empty() { ("Copy Answer", "↵") }
         else { ("Send Follow-up", "↵") };
     (body, left, action)
+}
+
+/// A conversation's blocks: prompts, Markdown answers (selectable, links open in the browser),
+/// tool calls and errors. `running`: the last answer is still streaming.
+fn transcript_log(blocks: &[Block], running: bool, md: &rune_kit::MarkdownStyle, t: &tok::Theme) -> El {
+    let mut log = col().key("transcript").w_full().px(20.0).py(14.0).gap(10.0);
+    for (i, block) in blocks.iter().enumerate() {
+        let last = i + 1 == blocks.len();
+        log = log.child(match block {
+            Block::Prompt(p) => row().w_full().gap(10.0).padding(10.0).radius(9.0).fill(t.control_off)
+                .child(text("›").font(ty::body()).color(AGENT_COLOR))
+                .child(text(p.clone()).font(ty::body()).color(t.text).wrap().selectable(true).grow(1.0).min_w(0.0)),
+            Block::Text(md_src) => col().w_full()
+                .child(Markdown::new(md_src.trim()).streaming(running && last).selectable(true)
+                    .on_link(|s: &mut Tomboy, url: &str| {
+                        if let Err(e) = url::open(url) { s.status = Some(format!("Failed: {e}")); }
+                    })
+                    .render(md)),
+            Block::Tool(summary) => row().w_full().gap(8.0).center_y()
+                .child(text("⚙").font(ty::label()).color(t.text_secondary))
+                .child(text(summary.clone()).font(ty::label().family(Family::Mono)).color(t.text_secondary).truncate().selectable(true)
+                    .grow(1.0).min_w(0.0)),
+            Block::Error(e) => text(e.clone()).font(ty::body()).color(Color { r: 0.95, g: 0.35, b: 0.35, a: 1.0 }).wrap().selectable(true),
+        });
+    }
+    if running && !matches!(blocks.last(), Some(Block::Text(_))) {
+        log = log.child(text("Thinking…").font(ty::label()).color(t.text_secondary));
+    }
+    log
+}
+
+/// The past agent conversations on the left, the picked one's transcript on the right.
+fn history_body(s: &Tomboy, dark: bool, t: &tok::Theme, accent: Color) -> (El, String, (&'static str, &'static str)) {
+    let past = s.history.as_deref().unwrap_or_default();
+    let items = results(s);
+    let now = agent_history::now();
+    let mut list = col().key("results").w_full().padding(8.0);
+    for (i, item) in items.iter().enumerate() {
+        let Item::Past(p) = item else { continue };
+        list = list.child(past_row(&past[*p], i, i == s.picked, now, t, accent));
+    }
+    if items.is_empty() {
+        let empty = if past.is_empty() { "No agent conversations yet" } else { "No matching conversations" };
+        list = list.child(col().h(120.0).w_full().center()
+            .child(text(empty).font(ty::body()).color(t.text_secondary)));
+    }
+    let picked = match items.get(s.picked) { Some(Item::Past(p)) => past.get(*p), _ => None };
+    let preview = match picked {
+        Some(saved) => {
+            let md = ty::markdown(dark);
+            let where_ = saved.dir.as_ref().map(|d| format!(" · {}", sys::tilde(d))).unwrap_or_default();
+            let who = match &saved.model { Some(m) => format!("{} ({m})", saved.agent), None => saved.agent.clone() };
+            col().key("history-preview").grow(1.0).min_w(0.0).h_full()
+                .child(col().key("history-preview-scroll").w_full().grow(1.0).min_h(0.0)
+                    .scroll(ScrollSpec { stick_bottom: true })
+                    .child(transcript_log(&saved.blocks, false, &md, t)))
+                .child(el().h(1.0).w_full().fill(t.separator))
+                .child(text(format!("{who}{where_}")).font(ty::label()).color(t.text_secondary).truncate().px(16.0).py(8.0))
+        }
+        None => col().grow(1.0),
+    };
+    let body = row().w_full().grow(1.0).min_h(0.0)
+        .child(col().w(300.0).h_full().min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(list))
+        .child(el().w(1.0).h_full().fill(t.separator))
+        .child(preview);
+    let left = s.status.clone().unwrap_or_else(|| {
+        let n = past.len();
+        let back = if s.direct { "esc to close" } else { "esc to go back" };
+        format!("{n} conversation{} · del deletes · {back}", if n == 1 { "" } else { "s" })
+    });
+    (body, left, (if picked.is_some() { "Open Conversation" } else { "" }, "↵"))
+}
+
+fn past_row(saved: &agent_history::Saved, i: usize, on: bool, now: i64, t: &tok::Theme, accent: Color) -> El {
+    let fg = if on { Color::WHITE } else { t.text };
+    let fg2 = if on { Color::WHITE.alpha(0.75) } else { t.text_secondary };
+    let turns = saved.turns();
+    let sub = format!("{} · {} · {turns} turn{}", agent_history::ago(saved.updated, now), saved.agent,
+        if turns == 1 { "" } else { "s" });
+    row().key(format!("item-{i}")).h(ty::px(52.0)).px(10.0).gap(10.0).radius(8.0).center_y()
+        .fill(if on { accent.alpha(0.85) } else { Color::TRANSPARENT })
+        .child(col().grow(1.0).min_w(0.0).gap(2.0)
+            .child(text(saved.title()).font(ty::body()).color(fg).truncate())
+            .child(text(sub).font(ty::label()).color(fg2).truncate()))
+        .on_hover(move |s: &mut Tomboy| s.picked = i)
+        .on_press_tx(move |s: &mut Tomboy, tx: &mut Tx| {
+            s.picked = i;
+            let item = results(s).get(i).cloned();
+            if let Some(item) = item { run_item(s, &item, tx); }
+        })
 }
 
 fn keycap(label: &str, t: &tok::Theme) -> El {
@@ -1461,6 +1623,9 @@ fn item_row(s: &Tomboy, item: &Item, i: usize, on: bool, t: &tok::Theme, accent:
             (glyph_in(&g, extui::ext_color(), Some(NERD_FONT)), title, sub, "Command")
         }
         Item::ExtRow(_) | Item::StoreRow(_) => (glyph("•", accent), String::new(), None, ""), // drawn by `extui`
+        Item::AgentHistory => (glyph_in(AGENT_GLYPH, AGENT_COLOR, Some(NERD_FONT)),
+            "Agent History".into(), Some("Past agent conversations; open one to continue it".into()), "Command"),
+        Item::Past(_) => (glyph("•", accent), String::new(), None, ""), // drawn by `past_row`
         Item::Quicklink { link, arg } => {
             let l = &s.links[*link];
             let (title, sub) = match arg {
@@ -1557,6 +1722,34 @@ fn chat_scene(s: &mut Tomboy) {
             Stop it with `kill 48211`, or press `q` in its terminal.".into()),
     ], Status::Done { secs: 6.4, cost_usd: Some(0.0213) });
     s.chat = Some(run);
+}
+
+/// Past conversations for the headless `agent-history` scene.
+fn history_scene(s: &mut Tomboy) {
+    let now = agent_history::now();
+    let conv = |id: &str, ago: i64, agent: &str, blocks: Vec<Block>| agent_history::Saved {
+        id: id.into(), agent: agent.into(), model: None, dir: sys::home_dir().map(|h| h.join("Work")),
+        session: Some(format!("session-{id}")), created: now - ago, updated: now - ago, blocks,
+    };
+    s.history = Some(vec![
+        conv("a", 300, "claude", vec![
+            Block::Prompt("what's using port 3000?".into()),
+            Block::Tool("Bash: ss -ltnp | grep :3000".into()),
+            Block::Text("**node** (pid `48211`) is listening on port 3000 — your `vite` dev server.\n\nStop it with `kill 48211`.".into()),
+            Block::Prompt("and port 5432?".into()),
+            Block::Text("That's **postgres**, started by systemd ([docs](https://www.postgresql.org/docs/)).".into()),
+        ]),
+        conv("b", 3 * 3600, "claude", vec![
+            Block::Prompt("change the working directory to ~/sites".into()),
+            Block::Tool("Edit: ~/.config/tomboy/config.toml".into()),
+            Block::Text("Done: `[agent] working_directory = \"~/sites\"`.".into()),
+        ]),
+        conv("c", 2 * 86_400, "opencode", vec![
+            Block::Prompt("summarize the last 5 commits in tomboy".into()),
+            Block::Text("1. Performance plan\n2. Extension fixes\n3. Luau extensions".into()),
+        ]),
+    ]);
+    s.direct = true;
 }
 
 /// A clipboard history for the headless `clipboard` scene.
@@ -1689,6 +1882,9 @@ fn spec() -> AppSpec<Tomboy> {
             ("omarchy", |s| s.query = TextEdit::new("bar")),
             ("system", |s| s.query = TextEdit::new("dark")),
             ("chat", chat_scene),
+            ("agent-history", history_scene),
+            ("agent-history-open", |s| { history_scene(s); open_past(s, 0); }),
+            ("agent-history-command", |s| s.query = TextEdit::new("agent hist")),
             ("submenu", |s| s.submenu = Some("learn".into())),
             ("units", |s| s.query = TextEdit::new("100 km to miles")),
             ("time", |s| s.query = TextEdit::new("time in tokyo")),
@@ -1768,6 +1964,39 @@ mod extension_flow_tests {
         assert!(s.query.text.is_empty() && s.session.is_some());
         assert!(on_input_key(&mut s, &key(Key::Escape), &mut tx));
         assert!(s.session.is_none());
+    }
+
+    /// The history lists past conversations; one opens as the live chat with its turns, Esc
+    /// comes back to the list, and the search filters it.
+    #[test]
+    fn agent_history_opens_and_returns() {
+        let mut s = init();
+        let mut tx = Tx::default();
+        s.query = TextEdit::new("agents");
+        assert!(results(&s).contains(&Item::AgentHistory));
+        s.query = TextEdit::new("");
+        history_scene(&mut s);
+        s.direct = false;
+        assert_eq!(results(&s), [Item::Past(0), Item::Past(1), Item::Past(2)]);
+        s.query = TextEdit::new("postgres");
+        assert_eq!(results(&s), [Item::Past(0)]);
+        s.query = TextEdit::new("");
+        s.picked = 1;
+        submit(&mut s, &mut tx);
+        let run = s.chat.clone().expect("opened");
+        {
+            let t = run.lock();
+            assert_eq!(t.session.as_deref(), Some("session-b"));
+            assert_eq!(t.history_id.as_deref(), Some("b"));
+            assert_eq!(t.status, Status::Idle);
+            assert_eq!(t.last_answer(), "Done: `[agent] working_directory = \"~/sites\"`.");
+        }
+        // Esc goes back to the list (read again from disk), not out of tomboy.
+        assert!(on_input_key(&mut s, &key(Key::Escape), &mut tx));
+        assert!(s.chat.is_none() && s.history.is_some());
+        // Esc on the list goes back to the launcher.
+        assert!(on_input_key(&mut s, &key(Key::Escape), &mut tx));
+        assert!(s.history.is_none());
     }
 
     /// Esc and Super+W close the conversation even when the search field has lost focus.

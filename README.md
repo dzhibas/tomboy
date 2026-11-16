@@ -129,6 +129,12 @@ All OS commands live in `src/sys.rs`, `src/apps/{linux,macos}.rs` and `src/mac/`
   follow-ups in the same session (claude `--resume`). Enter on an empty field copies the
   answer; Esc stops a running agent, a second Esc closes. Claude streams JSON events;
   opencode, codex and crush stream plain text; other agents open in a terminal instead.
+- **Agent History**: every conversation is saved to `~/.local/state/tomboy/agent-sessions/`.
+  "Agent History" (type `agents`, or run `tomboy agents`) lists them, newest first, searchable
+  by what was asked and answered, with the picked one's transcript beside the list (Delete
+  removes it). Enter reopens it: follow-ups continue it — Claude resumes its own session in the
+  directory it ran in; other agents get the earlier turns with the new prompt. Esc goes back to
+  the list.
 - **Voice → agent**: text dictated into tomboy with Superwhisper (one multi-character insert
   that matches `superwhisper read` from the last minute) goes straight to the agent. Typed
   text never triggers it.
@@ -523,6 +529,6 @@ CC_x86_64_unknown_linux_gnu=clang AR_x86_64_unknown_linux_gnu=ar \
 ```sh
 cargo test
 cargo test live_claude -- --ignored   # runs the real claude CLI (tiny paid request)
-cargo run -- --snap shot.png --scene calc   # scenes: apps calc url web omarchy system chat submenu units time dev kill currency quicklink quicklink-arg alias todo todo-command todo-add store ext-hackernews
+cargo run -- --snap shot.png --scene calc   # scenes: apps calc url web omarchy system chat agent-history agent-history-open submenu units time dev kill currency quicklink quicklink-arg alias todo todo-command todo-add store ext-hackernews
 cargo run -- --tree tree.json --scene apps
 ```

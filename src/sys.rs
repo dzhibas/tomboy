@@ -119,6 +119,15 @@ fn on_path(program: &str) -> bool {
 }
 
 /// The user's home directory.
+/// `path` with the home directory shown as `~`.
+pub fn tilde(path: &std::path::Path) -> String {
+    match home_dir().and_then(|h| path.strip_prefix(&h).ok().map(std::path::Path::to_path_buf)) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".into(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
+}
+
 pub fn home_dir() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME").filter(|h| !h.is_empty()).map(Into::into)
 }

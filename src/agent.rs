@@ -17,11 +17,17 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::agent_history::{self, Saved};
 use crate::config;
 use crate::platform::Platform;
 use crate::sys;
+
+/// How much of the earlier conversation (characters) goes with a follow-up to an agent that
+/// can't resume a session.
+const CONTEXT_LIMIT: usize = 24_000;
 
 /// What the agent knows about tomboy: the config file and every option in it.
 pub const SKILL: &str = include_str!("skill.md");
@@ -98,7 +104,8 @@ fn headless_argv(agent: &str, prompt: &str, resume: Option<&str>, extra_dirs: &[
 
 // ---- Transcript ----------------------------------------------------------------------------
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "text", rename_all = "lowercase")]
 pub enum Block {
     /// The user's prompt (one per turn).
     Prompt(String),
@@ -111,6 +118,8 @@ pub enum Block {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Status {
+    /// Nothing has run yet in this window: a new conversation, or one reopened from history.
+    Idle,
     Running,
     Done { secs: f32, cost_usd: Option<f64> },
     Failed(String),
@@ -132,6 +141,10 @@ pub struct Transcript {
     dir: Option<PathBuf>,
     /// The model the agent is told to use (`[agent.models]`); `None` is its own default.
     pub model: Option<String>,
+    /// The conversation's file in the history (`agent_history`), once its first turn starts.
+    pub history_id: Option<String>,
+    /// When the conversation started (unix seconds).
+    pub created: i64,
 }
 
 impl Transcript {
@@ -153,6 +166,21 @@ impl Transcript {
     pub fn is_running(&self) -> bool {
         self.status == Status::Running
     }
+
+    /// This conversation as the history keeps it (`None` before its first turn).
+    pub fn to_saved(&self) -> Option<Saved> {
+        Some(Saved {
+            id: self.history_id.clone()?, agent: self.agent.clone(), model: self.model.clone(), dir: self.dir.clone(),
+            session: self.session.clone(), created: self.created, updated: agent_history::now(), blocks: self.blocks.clone(),
+        })
+    }
+}
+
+/// Write the conversation to the history; a failure only costs the history entry.
+fn persist(snapshot: Option<Saved>) {
+    if let Some(saved) = snapshot && let Err(e) = agent_history::save(&saved) {
+        eprintln!("tomboy: saving the agent conversation: {e}");
+    }
 }
 
 /// A transcript shared between tomboy's UI and the threads reading the agent.
@@ -164,9 +192,23 @@ impl Run {
     /// stays for the whole conversation, since a resumed session belongs to its directory.
     pub fn new(agent: String, dir: Option<PathBuf>, model: Option<String>) -> Self {
         Run(Arc::new(Mutex::new(Transcript {
-            agent, dir, model, blocks: Vec::new(), status: Status::Done { secs: 0.0, cost_usd: None },
-            session: None, pgid: None, turn: 0, started: Instant::now(),
+            agent, dir, model, blocks: Vec::new(), status: Status::Idle,
+            session: None, pgid: None, turn: 0, started: Instant::now(), history_id: None, created: agent_history::now(),
         })))
+    }
+
+    /// A conversation from the history, ready for a follow-up: Claude resumes its session in
+    /// the directory it ran in; other agents get the earlier turns with the next prompt.
+    pub fn resume(saved: Saved) -> Self {
+        let run = Run::new(saved.agent, saved.dir, saved.model);
+        {
+            let mut t = run.lock();
+            t.blocks = saved.blocks;
+            t.session = saved.session;
+            t.history_id = Some(saved.id);
+            t.created = saved.created;
+        }
+        run
     }
 
     /// A finished transcript, for headless snapshots.
@@ -183,9 +225,14 @@ impl Run {
     /// Start a turn: run the agent on `prompt` (continuing the session when there is one) and
     /// stream its output into the transcript, calling `wake` whenever it changes.
     pub fn start(&self, prompt: &str, wake: impl Fn() + Send + Sync + 'static) -> io::Result<()> {
-        let (agent, session, dir, model) = {
+        let (agent, session, dir, model, context) = {
             let t = self.lock();
-            (t.agent.clone(), t.session.clone(), t.dir.clone(), t.model.clone())
+            // With no session to resume (any agent but Claude), the earlier turns go with the prompt.
+            let context = if t.session.is_none() { agent_history::context(&t.blocks, CONTEXT_LIMIT) } else { String::new() };
+            (t.agent.clone(), t.session.clone(), t.dir.clone(), t.model.clone(), context)
+        };
+        let full_prompt = if context.is_empty() { prompt.to_string() } else {
+            format!("Earlier in this conversation:\n\n{context}\n\n---\n\nThe follow-up:\n\n{}", prompt.trim())
         };
         // tomboy's config, state and todo directories (config.toml, frecency.json, the daily
         // lists), created so the agent may write into them.
@@ -193,22 +240,24 @@ impl Run {
                                         sys::state_dir().map(|d| d.join("tomboy")),
                                         config::load().0.todo_dir()]
             .into_iter().flatten().filter(|d| std::fs::create_dir_all(d).is_ok()).collect();
-        let argv = headless_argv(&agent, prompt, session.as_deref(), &extra_dirs, model.as_deref())
+        let argv = headless_argv(&agent, &full_prompt, session.as_deref(), &extra_dirs, model.as_deref())
             .ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, format!("{agent} has no headless mode")))?;
         let mut cmd = Command::new(&argv[0]);
         cmd.args(&argv[1..]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
         std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
         if let Some(dir) = dir { cmd.current_dir(dir); }
         let mut child = cmd.spawn()?;
-        let turn = {
+        let (turn, snapshot) = {
             let mut t = self.lock();
             t.blocks.push(Block::Prompt(prompt.trim().to_string()));
             t.status = Status::Running;
             t.pgid = Some(child.id());
             t.started = Instant::now();
             t.turn += 1;
-            t.turn
+            if t.history_id.is_none() { t.history_id = Some(agent_history::new_id()); }
+            (t.turn, t.to_saved())
         };
+        persist(snapshot);
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
         let stderr = child.stderr.take().map(|e| {
             std::thread::spawn(move || {
@@ -242,7 +291,9 @@ impl Run {
                     Status::Failed(msg.trim().to_string())
                 };
             }
+            let snapshot = t.to_saved();
             drop(t);
+            persist(snapshot);
             wake();
         });
         Ok(())
@@ -255,6 +306,9 @@ impl Run {
             let _ = Command::new("kill").args(["-TERM", &format!("-{pgid}")])
                 .stdout(Stdio::null()).stderr(Stdio::null()).status();
             t.status = Status::Failed("Stopped".into());
+            let snapshot = t.to_saved();
+            drop(t);
+            persist(snapshot);
         }
     }
 }
@@ -318,7 +372,8 @@ mod tests {
 
     fn transcript() -> Transcript {
         Transcript { agent: "claude".into(), blocks: vec![Block::Prompt("hi".into())], status: Status::Running,
-            session: None, pgid: None, turn: 1, started: Instant::now(), dir: None, model: None }
+            session: None, pgid: None, turn: 1, started: Instant::now(), dir: None, model: None,
+            history_id: None, created: 0 }
     }
 
     #[test]
