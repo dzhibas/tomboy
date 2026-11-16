@@ -33,6 +33,8 @@ mod mac;
 mod omarchy;
 mod platform;
 mod quicklinks;
+#[cfg(unix)]
+mod single;
 mod sys;
 mod todo;
 mod trace;
@@ -402,6 +404,8 @@ fn setup(s: &mut Tomboy, waker: Waker) {
     }
     s.wake = waker.clone();
     if s.dev_open || s.store.is_some() { waker(); }
+    #[cfg(unix)]
+    if !s.resident { single::set_waker(waker.clone()); }
     s.waker = Some(waker);
     sync_clip_image(s);
     trace::since("setup (total)", started);
@@ -456,6 +460,8 @@ fn on_change(s: &mut Tomboy, tx: &mut Tx) {
 /// of the result list.
 fn poll(s: &mut Tomboy, now: f64, tx: &mut Tx) -> bool {
     let woke = s.woke.swap(false, Ordering::AcqRel);
+    #[cfg(unix)]
+    if single::close_requested() { quit(s, tx); return true; }
     if std::mem::take(&mut s.dev_open) && !s.extensions.is_empty() {
         run_item(s, &Item::Extension { ext: 0, command: 0 }, tx);
         s.direct = true;
@@ -1873,6 +1879,9 @@ fn main() {
             "the background launcher is for macOS; on Linux bind `tomboy` to a key in your compositor"))),
         _ => {}
     }
+    // The launch hotkey toggles one window: a second launch closes the open one and exits.
+    #[cfg(unix)]
+    if !single::claim() { return; }
     rune::set_app_id("tomboy");
     // macOS: device and pipelines on a thread. Linux: `prewarm_gpu` does nothing there, and
     // `warm_gpu` is its equivalent, so the window's first frame doesn't wait ~40 ms for them.
@@ -1891,14 +1900,18 @@ fn main() {
         .on_frame_encoded(first_frame::on_frame)
         .on_ready(|_| trace::mark("on_ready (first frame on the GPU)"))
         .run();
+    #[cfg(unix)]
+    single::release();
     trace::mark("event loop exited");
     trace::summary();
 }
 
-/// Clicking away closes the launcher (hides the daemon's), but not while a conversation is open.
+/// Losing focus never closes a launched window: focus-follows-mouse would close it the moment
+/// the pointer left. Esc, Cmd/Super+W or the compositor's close does. Only the macOS daemon's
+/// panel hides on click-away (not while a conversation is open).
 fn on_focus(s: &mut Tomboy, focused: bool, tx: &mut Tx) {
     if focused { trace::first("window focused"); s.had_focus = true; return; }
-    if s.had_focus && s.chat.is_none() { quit(s, tx) }
+    if s.resident && s.had_focus && s.chat.is_none() { quit(s, tx) }
 }
 
 /// `tomboy daemon`: stay running with no Dock icon, the window a hidden launcher panel that
