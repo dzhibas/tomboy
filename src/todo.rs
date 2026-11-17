@@ -36,7 +36,7 @@ pub struct Day {
 
 /// Today's date, local time.
 pub fn today_date() -> Date {
-    jiff::Zoned::now().date()
+    jiff::ZonedDateTime::now().date()
 }
 
 /// `(done, text)` for a task line; `None` for anything else (including `- [>]` moved tasks).

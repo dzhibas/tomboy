@@ -94,8 +94,8 @@ fn answer_at(query: &str, now: Timestamp, local: &TimeZone) -> Option<Answer> {
     let place = place_of(query)?;
     let (name, zone) = resolve(&place)?;
 
-    let there = now.to_zoned(zone);
-    let here = now.to_zoned(local.clone());
+    let there = now.to_zoned_datetime(zone);
+    let here = now.to_zoned_datetime(local.clone());
 
     let mut title = there.strftime("%H:%M").to_string();
     if there.date() != here.date() {

@@ -1,11 +1,11 @@
 [package]
 name = "tomboy"
-version = "0.4.6"
+version = "0.4.7"
 edition = "2024"
 description = "A personal Raycast-style launcher built with Rune"
 
 [dependencies]
-jiff = "0.2.42"
+jiff = "1.0.0"
 # Rune is pre-release: pin a rev of `dev` (never rewritten).
 rune = { git = "https://github.com/anomalyco/rune", rev = "27497964979dfe6575adfd60a5cb8f3b85240b6f" }
 rune-luau = { git = "https://github.com/anomalyco/rune", rev = "27497964979dfe6575adfd60a5cb8f3b85240b6f", features = ["serde"] }

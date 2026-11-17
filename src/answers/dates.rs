@@ -6,7 +6,7 @@
 //! (`monday in 3 weeks`) is that weekday in the week (Monday to Sunday) the offset lands in.
 
 use jiff::civil::{Date, Weekday};
-use jiff::{Span, Zoned};
+use jiff::{Span, ZonedDateTime};
 
 use super::{Answer, Kind};
 
@@ -24,7 +24,7 @@ pub fn answer(query: &str) -> Option<Answer> {
     // Cheap rejection before looking at the clock: every form has one of these words.
     const HINTS: &[&str] = &["day", "week", "month", "year", "ago", "next", "last", "today", "tomorrow", "yesterday", "in ", "-"];
     if !HINTS.iter().any(|h| q.contains(h)) { return None; }
-    answer_at(&q, Zoned::now().date())
+    answer_at(&q, ZonedDateTime::now().date())
 }
 
 fn answer_at(q: &str, today: Date) -> Option<Answer> {

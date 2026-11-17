@@ -295,7 +295,7 @@ fn record(bytes: &[u8], mime: &str) -> io::Result<()> {
         std::fs::create_dir_all(&images)?;
         let file = images.join(format!("{hash}.{ext}"));
         if !file.exists() { std::fs::write(&file, bytes)?; }
-        let captured = jiff::Zoned::now().strftime("%A %H:%M").to_string();
+        let captured = jiff::ZonedDateTime::now().strftime("%A %H:%M").to_string();
         Clip::Image { mime: mime.to_string(), path: file, captured: Some(captured) }
     } else {
         let text = String::from_utf8_lossy(bytes).into_owned();

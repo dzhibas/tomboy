@@ -115,7 +115,7 @@ fn format_epoch(arg: &str, tz: &jiff::tz::TimeZone) -> Option<(String, String)> 
     } else {
         (jiff::Timestamp::from_second(n).ok()?, "Unix")
     };
-    let title = ts.to_zoned(tz.clone()).strftime("%a %-d %b %Y %H:%M:%S").to_string();
+    let title = ts.to_zoned_datetime(tz.clone()).strftime("%a %-d %b %Y %H:%M:%S").to_string();
     let zone = tz.iana_name().unwrap_or("local time");
     Some((title, format!("{unit} {n} in {zone}")))
 }
