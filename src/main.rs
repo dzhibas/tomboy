@@ -42,7 +42,7 @@ mod url;
 
 use rune::tok::{self, type_};
 use rune::{
-    App, AppSpec, Color, Cx, El, Family, Image, ImageCache, Key, KeyEvent, ScrollSpec, SurfaceFit, TextEdit, Tx,
+    Anim, App, AppSpec, Color, Cursor, Cx, Drag, El, Phase, Family, Image, ImageCache, Key, KeyEvent, ScrollSpec, SurfaceFit, TextEdit, Tx,
     WindowOptions, Waker, GrowthSpec, col, el, row, spacer, text, text_input,
 };
 use rune_kit::Markdown;
@@ -162,6 +162,10 @@ struct Tomboy {
     quicklink: Option<usize>,
     /// Today's todo list, while it's open.
     todo: Option<todo::Day>,
+    /// A task being dragged by its grip to a new place in the list.
+    task_drag: Option<TaskDrag>,
+    /// The task whose text is in the field to edit: Enter saves it there, Esc cancels.
+    editing_task: Option<todo::Task>,
     /// Today's (done, total), for the launcher row; kept up to date as the list changes.
     todo_counts: (usize, usize),
     /// Running as `tomboy daemon` (macOS): closing hides the window and resets it for the
@@ -320,7 +324,7 @@ fn init() -> Tomboy {
         seed, wake: Arc::new(|| {}),
         clips: None, direct: false, emoji: None, clip_image: None, frecency,
         links, quicklink: None,
-        todo: None, todo_counts,
+        todo: None, task_drag: None, editing_task: None, todo_counts,
         config, resident, me: None, shown: None, paste: false, had_focus: false,
         extensions, session: None, store: None, panel: None, dev_open: DEV_DIR.get().is_some(),
     };
@@ -834,6 +838,7 @@ fn copy_emoji(s: &mut Tomboy, tx: &mut Tx) {
 fn todo_key_event(s: &mut Tomboy, ev: &KeyEvent, tx: &mut Tx) -> bool {
     let empty = s.query.text.is_empty();
     let result = match &ev.key {
+        Key::Escape if s.editing_task.is_some() => { cancel_task_edit(s); s.status = None; Ok(()) }
         Key::Escape if !empty => { s.query.clear(); s.last_text.clear(); Ok(()) }
         Key::Escape if s.direct => { quit(s, tx); Ok(()) }
         Key::Escape | Key::Backspace if empty => { leave_todo(s); Ok(()) }
@@ -925,6 +930,8 @@ fn enter_todo(s: &mut Tomboy) {
 
 fn leave_todo(s: &mut Tomboy) {
     s.todo = None;
+    s.task_drag = None;
+    s.editing_task = None;
     enter_submenu(s, s.submenu.clone());
 }
 
@@ -952,6 +959,81 @@ fn toggle_task(s: &mut Tomboy, i: usize) -> std::io::Result<()> {
     let Some(task) = day.tasks().get(i).cloned() else { return Ok(()) };
     if !day.toggle(&task)? { s.status = Some("The list changed on disk; reloaded".into()); }
     s.todo_counts = day.counts();
+    Ok(())
+}
+
+/// What the action panel (ctrl+k) offers for a task.
+#[derive(Clone, Debug)]
+enum TodoAction { Edit(usize), Toggle(usize, bool), Delete(usize) }
+
+impl TodoAction {
+    fn title(&self) -> &'static str {
+        match self {
+            TodoAction::Edit(_) => "Edit Todo",
+            TodoAction::Toggle(_, true) => "Mark Open",
+            TodoAction::Toggle(_, false) => "Mark Done",
+            TodoAction::Delete(_) => "Delete Todo",
+        }
+    }
+}
+
+/// The picked task's actions.
+fn todo_actions(s: &Tomboy) -> Vec<TodoAction> {
+    let i = s.picked;
+    match s.todo.as_ref().and_then(|d| d.tasks().get(i).cloned()) {
+        Some(t) => vec![TodoAction::Edit(i), TodoAction::Toggle(i, t.done), TodoAction::Delete(i)],
+        None => Vec::new(),
+    }
+}
+
+fn run_todo_action(s: &mut Tomboy, a: TodoAction) {
+    let result = match a {
+        TodoAction::Edit(i) => { start_task_edit(s, i); Ok(()) }
+        TodoAction::Toggle(i, _) => toggle_task(s, i),
+        TodoAction::Delete(i) => remove_task(s, i),
+    };
+    if let Err(e) = result { s.status = Some(format!("Failed: {e}")); }
+}
+
+/// Put task `i`'s text in the field to edit; Enter saves it to the same task.
+fn start_task_edit(s: &mut Tomboy, i: usize) {
+    let Some(task) = s.todo.as_ref().and_then(|d| d.tasks().get(i).cloned()) else { return };
+    // A fresh field, focused with the cursor at the end, to type into at once.
+    s.query = TextEdit::new(task.text.clone());
+    s.query.focused = true;
+    s.last_text = task.text.clone();
+    s.picked = i;
+    s.status = None;
+    s.editing_task = Some(task);
+}
+
+fn cancel_task_edit(s: &mut Tomboy) {
+    s.editing_task = None;
+    s.query.clear();
+    s.last_text.clear();
+}
+
+/// Save the field's text to the task being edited.
+fn save_task_edit(s: &mut Tomboy) -> std::io::Result<()> {
+    let (Some(day), Some(task)) = (s.todo.as_mut(), s.editing_task.clone()) else { return Ok(()) };
+    let text = s.query.text.trim().to_string();
+    if text.is_empty() { s.status = Some("A todo needs some text · esc cancels".into()); return Ok(()); }
+    let saved = day.edit(&task, &text)?;
+    let still_there = day.tasks().iter().any(|t| t.text == text);
+    s.status = Some(if saved { format!("Saved “{text}”") }
+        else if still_there { "No changes".into() }
+        else { "The list changed on disk; reloaded".into() });
+    cancel_task_edit(s);
+    Ok(())
+}
+
+/// Move task `from` of the open list to `to`'s place.
+fn move_task(s: &mut Tomboy, from: usize, to: usize) -> std::io::Result<()> {
+    let Some(day) = s.todo.as_mut() else { return Ok(()) };
+    let tasks = day.tasks();
+    let (Some(task), Some(target)) = (tasks.get(from), tasks.get(to)) else { return Ok(()) };
+    if !day.reorder(task, target)? { s.status = Some("The list changed on disk; reloaded".into()); }
+    s.picked = to.min(day.tasks().len().saturating_sub(1));
     Ok(())
 }
 
@@ -1111,6 +1193,10 @@ fn submit(s: &mut Tomboy, tx: &mut Tx) {
     if s.panel.is_some() { extui::run_panel(s, tx); return; }
     if extui::store_submit(s, tx) { return; }
     if s.emoji.is_some() { copy_emoji(s, tx); return; }
+    if s.todo.is_some() && s.editing_task.is_some() {
+        if let Err(e) = save_task_edit(s) { s.status = Some(format!("Failed: {e}")); }
+        return;
+    }
     if s.todo.is_some() && !s.query.text.trim().is_empty() {
         // Typing in the list adds a todo; with the field empty, Enter toggles the picked one.
         let text = s.query.text.clone();
@@ -1219,8 +1305,44 @@ fn on_input_key(s: &mut Tomboy, ev: &KeyEvent, tx: &mut Tx) -> bool {
         _ => return false,
     }
     sync_clip_image(s);
-    tx.scroll_into_view(format!("item-{}", s.picked));
+    tx.scroll_into_view(item_key(s, s.picked));
     true
+}
+
+/// The key of result row `i`. A task's row is keyed by the task, not its place, so a dropped
+/// row slides from where it was let go into its new place.
+fn item_key(s: &Tomboy, i: usize) -> String {
+    match &s.todo {
+        Some(day) => task_key(&day.tasks(), i),
+        None => format!("item-{i}"),
+    }
+}
+
+/// `task-<text>#<n>`: the nth task with that text.
+fn task_key(tasks: &[todo::Task], i: usize) -> String {
+    let Some(t) = tasks.get(i) else { return format!("item-{i}") };
+    let n = tasks[..i].iter().filter(|o| o.text == t.text).count();
+    format!("task-{}#{n}", t.text)
+}
+
+/// A task held by its grip: from its place `from`, `dy` points from where it was pressed,
+/// over the place `to` it lands on if dropped now.
+#[derive(Clone, Copy, Debug)]
+struct TaskDrag { from: usize, to: usize, dy: f32 }
+
+/// Points the pointer travels before a press on the grip becomes a drag.
+const DRAG_SLOP: f32 = 4.0;
+
+impl TaskDrag {
+    /// How far row `i` sits from its place: the dragged row with the pointer, the rows between
+    /// its place and its target a row toward the gap it left.
+    fn shift(&self, i: usize, pitch: f32) -> f32 {
+        let TaskDrag { from, to, dy } = *self;
+        if i == from { dy }
+        else if from < i && i <= to { -pitch }
+        else if to <= i && i < from { pitch }
+        else { 0.0 }
+    }
 }
 
 fn view(s: &Tomboy, cx: &mut Cx<Tomboy>) -> El {
@@ -1248,6 +1370,7 @@ fn build_view(s: &Tomboy, cx: &mut Cx<Tomboy>) -> El {
         else if s.history.is_some() { "Search agent conversations…".to_string() }
         else if s.clips.is_some() { "Search clipboard…".to_string() }
         else if s.emoji.is_some() { "Search emoji and symbols…".to_string() }
+        else if s.todo.is_some() && s.editing_task.is_some() { "Edit the todo…".to_string() }
         else if s.todo.is_some() { "Add a todo…".to_string() }
         else if let Some(l) = s.quicklink { s.links[l].prompt() }
         else if let Some(c) = &crumb { format!("Search {}…", c.rsplit(" › ").next().unwrap_or(c)) }
@@ -1353,25 +1476,32 @@ fn todo_body(s: &Tomboy, t: &tok::Theme, accent: Color) -> (El, String, (&'stati
     let tasks = s.todo.as_ref().map(|d| d.tasks()).unwrap_or_default();
     let mut list = col().key("results").w_full().padding(8.0);
     for (i, task) in tasks.iter().enumerate() {
-        list = list.child(task_row(task, i, i == s.picked, t, accent));
+        let editing = s.editing_task.as_ref().is_some_and(|e| e.line == task.line && e.text == task.text);
+        list = list.child(task_row(&tasks, task, i, i == s.picked, editing, s.task_drag, t, accent));
     }
     if tasks.is_empty() {
         list = list.child(col().h(120.0).w_full().center()
             .child(text("Nothing on today's list. Type a todo and press Enter").font(ty::body()).color(t.text_secondary)));
     }
     let body = col().w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(list);
+    let body = extui::with_panel(s, body, t, accent);
     let (done, total) = s.todo_counts;
     let left = s.status.clone().unwrap_or_else(|| {
+        if let Some(task) = &s.editing_task { return format!("Editing “{}” · esc cancels", task.text); }
         let date = s.todo.as_ref().map(|d| d.date.strftime("%A %-d %B").to_string()).unwrap_or_default();
         let count = if total > 0 && done == total { "All done 🎉".to_string() } else { format!("{done}/{total} done") };
-        format!("{count} · {date} · space toggles, del removes")
+        format!("{count} · {date} · space toggles, del removes, {} actions", extui::panel_key_hint())
     });
-    let action = if !s.query.text.trim().is_empty() { ("Add Todo", "↵") }
+    let action = if s.editing_task.is_some() { ("Save Todo", "↵") }
+        else if !s.query.text.trim().is_empty() { ("Add Todo", "↵") }
         else { match tasks.get(s.picked) { Some(t) if t.done => ("Mark Open", "↵"), Some(_) => ("Mark Done", "↵"), None => ("", "↵") } };
     (body, left, action)
 }
 
-fn task_row(task: &todo::Task, i: usize, on: bool, t: &tok::Theme, accent: Color) -> El {
+fn task_row(tasks: &[todo::Task], task: &todo::Task, i: usize, on: bool, editing: bool, drag: Option<TaskDrag>, t: &tok::Theme, accent: Color) -> El {
+    let pitch = ty::px(40.0);
+    let count = tasks.len();
+    let lifted = drag.is_some_and(|d| d.from == i && d.dy.abs() >= DRAG_SLOP);
     let fg = match (on, task.done) {
         (true, false) => Color::WHITE,
         (true, true) => Color::WHITE.alpha(0.7),
@@ -1381,11 +1511,46 @@ fn task_row(task: &todo::Task, i: usize, on: bool, t: &tok::Theme, accent: Color
     // nf-md-checkbox_marked / checkbox_blank_outline
     let (glyph, glyph_color) = if task.done { ("\u{f0132}", if on { Color::WHITE } else { accent }) }
         else { ("\u{f0131}", fg) };
-    row().key(format!("item-{i}")).h(ty::px(40.0)).px(10.0).gap(10.0).radius(8.0).center_y()
-        .fill(if on { accent.alpha(0.85) } else { Color::TRANSPARENT })
+    // nf-md-drag_vertical: the grip to drag the task to a new place.
+    let grip = text("\u{f01dd}").font(rune::TextStyle { size: ty::px(18.0), ..ty::body().lh(ty::px(22.0)).family(NERD_FONT) })
+        .color(if on { Color::WHITE.alpha(0.75) } else { t.text_secondary.alpha(0.6) });
+    let grip = row().key("grip").h_full().w(ty::px(18.0)).center()
+        .cursor(if drag.is_some() { Cursor::Grabbing } else { Cursor::Grab })
+        .child(grip)
+        .on_drag(move |s: &mut Tomboy, d: &mut Drag, tx: &mut Tx| match d.phase {
+            Phase::Down => { s.picked = i; s.task_drag = Some(TaskDrag { from: i, to: i, dy: 0.0 }); }
+            Phase::Move => if let Some(drag) = s.task_drag.as_mut() {
+                drag.dy = d.dy;
+                if d.dy.abs() >= DRAG_SLOP {
+                    drag.to = (i as f32 + (d.dy / pitch).round()).clamp(0.0, count.saturating_sub(1) as f32) as usize;
+                }
+                tx.animated();
+            },
+            Phase::Up => if let Some(drag) = s.task_drag.take() {
+                if !d.cancelled() && drag.from != drag.to {
+                    if let Err(e) = move_task(s, drag.from, drag.to) { s.status = Some(format!("Failed: {e}")); }
+                }
+            },
+        });
+    let fill = if lifted { if on { accent } else { t.control_off } }
+        else if on { accent.alpha(0.85) } else { Color::TRANSPARENT };
+    let mut r = row().key(task_key(tasks, i)).h(pitch).pl(ty::px(4.0)).pr(10.0).gap(8.0).radius(8.0).center_y()
+        .fill(fill)
+        .child(grip)
         .child(text(glyph).font(rune::TextStyle { size: ty::px(20.0), ..ty::body().lh(ty::px(22.0)).family(NERD_FONT) }).color(glyph_color))
-        .child(text(task.text.clone()).font(ty::body()).color(fg).truncate().grow(1.0).min_w(0.0))
-        .on_hover(move |s: &mut Tomboy| s.picked = i)
+        .child(text(task.text.clone()).font(ty::body()).color(fg).truncate().grow(1.0).min_w(0.0));
+    // How long ago it was added, dimmed on the right (or that it's in the field to edit).
+    let detail = if editing { Some("editing".to_string()) }
+        else { task.created.map(|c| agent_history::ago(c, agent_history::now())) };
+    if let Some(detail) = detail {
+        r = r.child(text(detail).font(ty::label()).color(if on { Color::WHITE.alpha(0.75) } else { t.text_secondary }));
+    }
+    if let Some(d) = drag {
+        r = r.offset(0.0, d.shift(i, pitch));
+        // Follows the pointer exactly, above the rows it passes; they spring aside.
+        if lifted { r = r.raise().offset_motion(Anim::INSTANT).shadow(4.0, 12.0, Color::BLACK.alpha(0.35)); }
+    }
+    r.on_hover(move |s: &mut Tomboy| if s.task_drag.is_none() { s.picked = i })
         .on_press(move |s: &mut Tomboy| {
             s.picked = i;
             if let Err(e) = toggle_task(s, i) { s.status = Some(format!("Failed: {e}")); }
@@ -1831,8 +1996,9 @@ fn clipboard_scene(s: &mut Tomboy) {
 /// A day's list in memory (nothing written) for the headless `todo` scene.
 fn todo_scene(s: &mut Tomboy) {
     let day = todo::Day::demo(jiff::civil::date(2026, 11, 12), &[
-        (true, "Reply to Jonas about the offsite"), (true, "Ship tomboy 0.2"), (false, "Review PR #42"),
-        (false, "Buy milk"), (false, "Book the dentist"), (true, "Pay the electricity bill"), (false, "Call mum"),
+        (true, "Reply to Jonas about the offsite", 3 * 86_400), (true, "Ship tomboy 0.2", 26 * 3600),
+        (false, "Review PR #42", 5 * 3600), (false, "Buy milk", 2 * 3600), (false, "Book the dentist", 45 * 60),
+        (true, "Pay the electricity bill", 15 * 60), (false, "Call mum", 20),
     ]);
     s.todo_counts = day.counts();
     s.todo = Some(day);
@@ -1991,6 +2157,10 @@ fn spec() -> AppSpec<Tomboy> {
             ("quicklink-arg", |s| { demo_links(s); s.quicklink = Some(1); }),
             ("alias", |s| { demo_links(s); s.query = TextEdit::new("bubu"); }),
             ("todo", todo_scene),
+            // "Review PR #42" dragged down past two rows.
+            ("todo-panel", |s| { todo_scene(s); extui::open_panel(s); }),
+            ("todo-edit", |s| { todo_scene(s); start_task_edit(s, 2); }),
+            ("todo-drag", |s| { todo_scene(s); s.task_drag = Some(TaskDrag { from: 2, to: 4, dy: ty::px(86.0) }); }),
             ("todo-command", |s| { s.todo_counts = (3, 7); s.query = TextEdit::new("todo"); }),
             ("todo-add", |s| { s.todo_counts = (3, 7); s.query = TextEdit::new("todo buy milk"); }),
             ("store", |s| extui::store_scene(s, false)),
@@ -2016,6 +2186,38 @@ mod extension_flow_tests {
     use super::*;
 
     fn key(k: Key) -> KeyEvent { KeyEvent { key: k, mods: Default::default() } }
+
+    #[test]
+    fn todo_panel_edits_in_the_field() {
+        let dir = std::env::temp_dir().join(format!("tomboy-todo-panel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let date = jiff::civil::date(2026, 11, 12);
+        std::fs::write(dir.join("2026-11-12.md"), "# 2026-11-12\n\n- [ ] a\n- [ ] typo\n").unwrap();
+        let mut s = init();
+        let mut tx = Tx::default();
+        s.todo = Some(todo::Day::load(&dir, date).unwrap());
+        s.picked = 1;
+
+        // Ctrl/⌘+K, then Enter on the first action: Edit puts the text in the field.
+        assert!(on_input_key(&mut s, &key(Key::Command('k')), &mut tx));
+        assert!(s.panel.is_some());
+        submit(&mut s, &mut tx);
+        assert_eq!(s.query.text, "typo");
+        assert!(s.query.focused);
+        assert_eq!(s.query.focus, "typo".len()); // the cursor at the end
+        assert!(s.editing_task.is_some());
+
+        // Esc cancels without touching the file; editing again and Enter saves the same task.
+        assert!(on_input_key(&mut s, &key(Key::Escape), &mut tx));
+        assert!(s.editing_task.is_none() && s.query.text.is_empty() && s.todo.is_some());
+        start_task_edit(&mut s, 1);
+        s.query = TextEdit::new("fixed");
+        submit(&mut s, &mut tx);
+        assert!(s.editing_task.is_none() && s.query.text.is_empty());
+        assert_eq!(std::fs::read_to_string(dir.join("2026-11-12.md")).unwrap(), "# 2026-11-12\n\n- [ ] a\n- [ ] fixed\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn store_consent_and_extension_keys() {

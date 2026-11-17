@@ -247,6 +247,9 @@ launcher; whenever today has tasks, the empty launcher shows **Today · 3/10 don
   without opening the list, so you can add a few in a row.
 - **Check off**: ↑/↓ and Enter (or Space), or click a task. Enter on a done task opens it again.
 - **Remove**: Delete.
+- **Actions**: ctrl+k (⌘K on macOS) on a task: Edit (its text goes into the field; Enter saves it
+  to the same task, Esc cancels), Mark Done/Open, Delete.
+- **Reorder**: drag a task by its grip (the dots on the left); Esc mid-drag puts it back.
 - Esc clears the field, then goes back (or closes, when opened as `tomboy todo`).
 
 Each day is a Markdown file in `~/Documents/tomboy/todo/` (`[todo] directory`), so any editor,
@@ -256,8 +259,12 @@ Obsidian or the agent can read and change it; tomboy re-reads it on every change
 # 2026-11-12
 
 - [x] Reply to Jonas
-- [ ] Review PR #42
+- [ ] Review PR #42 <!-- created 2026-11-12T09:15:00Z -->
 ```
+
+A task tomboy adds gets a `<!-- created … -->` comment (hidden in rendered Markdown), shown in
+the list as how long ago it was added (`15m ago`, `2h ago`, `3d ago`); it stays with the task
+when it moves to a later day. Tasks without one just show no age.
 
 Opening the list moves the open tasks from your last earlier list into today, and they're
 marked `- [>]` (moved) in the old file, so nothing is open in two places and old days keep
@@ -531,7 +538,7 @@ CC_x86_64_unknown_linux_gnu=clang AR_x86_64_unknown_linux_gnu=ar \
 ```sh
 cargo test
 cargo test live_claude -- --ignored   # runs the real claude CLI (tiny paid request)
-cargo run -- --snap shot.png --scene calc   # scenes: apps calc url web omarchy system chat agent-history agent-history-open submenu units time dev kill currency quicklink quicklink-arg alias todo todo-command todo-add store ext-hackernews
+cargo run -- --snap shot.png --scene calc   # scenes: apps calc url web omarchy system chat agent-history agent-history-open submenu units time dev kill currency quicklink quicklink-arg alias todo todo-panel todo-edit todo-drag todo-command todo-add store ext-hackernews
 cargo run -- --tree tree.json --scene apps
 ```
 

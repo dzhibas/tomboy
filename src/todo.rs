@@ -9,7 +9,8 @@
 //! ```
 //!
 //! Tasks are `- [ ]` / `- [x]` lines (`*` works as the bullet too); every other line is kept as
-//! it is. Opening today's list moves the latest earlier day's open tasks into it, marked
+//! it is. A task added by tomboy ends with `<!-- created 2026-11-12T09:15:00Z -->` (hidden in
+//! rendered Markdown), so the list can show how long ago it was added. Opening today's list moves the latest earlier day's open tasks into it, marked
 //! `- [>]` (moved) where they were. Every change re-reads the file first, so
 //! an edit made meanwhile (the agent, an editor) isn't written over.
 
@@ -25,6 +26,8 @@ pub struct Task {
     pub line: usize,
     pub done: bool,
     pub text: String,
+    /// When it was added (Unix seconds), from its `<!-- created … -->` comment.
+    pub created: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -39,8 +42,30 @@ pub fn today_date() -> Date {
     jiff::ZonedDateTime::now().date()
 }
 
-/// `(done, text)` for a task line; `None` for anything else (including `- [>]` moved tasks).
+/// `(done, text)` for a task line, without its created comment; `None` for anything else
+/// (including `- [>]` moved tasks).
 fn parse(line: &str) -> Option<(bool, &str)> {
+    let (done, rest) = parse_raw(line)?;
+    Some((done, split_created(rest).0))
+}
+
+/// The created time of a task line, Unix seconds.
+fn created(line: &str) -> Option<i64> {
+    split_created(parse_raw(line)?.1).1
+}
+
+/// `"buy milk <!-- created 2026-11-12T09:15:00Z -->"` → ("buy milk", its time).
+fn split_created(rest: &str) -> (&str, Option<i64>) {
+    let parsed = rest.strip_suffix("-->").and_then(|r| r.rsplit_once("<!-- created ")).and_then(|(text, ts)| {
+        ts.trim().parse::<jiff::Timestamp>().ok().map(|t| (text.trim_end(), t.as_second()))
+    });
+    match parsed {
+        Some((text, t)) => (text, Some(t)),
+        None => (rest, None),
+    }
+}
+
+fn parse_raw(line: &str) -> Option<(bool, &str)> {
     let t = line.trim_start();
     let t = t.strip_prefix("- ").or_else(|| t.strip_prefix("* "))?;
     let (done, rest) = if let Some(r) = t.strip_prefix("[ ]") { (false, r) }
@@ -50,9 +75,15 @@ fn parse(line: &str) -> Option<(bool, &str)> {
     Some((done, rest.trim()))
 }
 
-fn task_line(text: &str, done: bool) -> String {
-    format!("- [{}] {}", if done { "x" } else { " " }, clean(text))
+fn task_line(text: &str, done: bool, created: Option<i64>) -> String {
+    let mut line = format!("- [{}] {}", if done { "x" } else { " " }, clean(text));
+    if let Some(t) = created.and_then(|t| jiff::Timestamp::from_second(t).ok()) {
+        line.push_str(&format!(" <!-- created {} -->", t.strftime("%Y-%m-%dT%H:%M:%SZ")));
+    }
+    line
 }
+
+fn now() -> i64 { jiff::Timestamp::now().as_second() }
 
 /// One line, no surrounding space.
 fn clean(text: &str) -> String {
@@ -75,17 +106,17 @@ impl Day {
         }
     }
 
-    /// A day held only in memory, for demos.
+    /// A day held only in memory, for demos: `(done, text, added this many seconds ago)`.
     #[cfg_attr(not(test), allow(dead_code))]
-    pub fn demo(date: Date, tasks: &[(bool, &str)]) -> Day {
+    pub fn demo(date: Date, tasks: &[(bool, &str, i64)]) -> Day {
         let mut d = Day::empty(date, PathBuf::from("/nonexistent/tomboy-demo.md"));
-        d.lines.extend(tasks.iter().map(|(done, t)| task_line(t, *done)));
+        d.lines.extend(tasks.iter().map(|(done, t, ago)| task_line(t, *done, Some(now() - ago))));
         d
     }
 
     pub fn tasks(&self) -> Vec<Task> {
         self.lines.iter().enumerate()
-            .filter_map(|(i, l)| parse(l).map(|(done, text)| Task { line: i, done, text: text.to_string() }))
+            .filter_map(|(i, l)| parse(l).map(|(done, text)| Task { line: i, done, text: text.to_string(), created: created(l) }))
             .collect()
     }
 
@@ -99,7 +130,8 @@ impl Day {
     pub fn add(&mut self, text: &str) -> io::Result<bool> {
         let text = clean(text);
         if text.is_empty() { return Ok(false); }
-        self.change(|lines| { insert_tasks(lines, &[text]); true })
+        let created = Some(now());
+        self.change(|lines| { insert_tasks(lines, &[(text, created)]); true })
     }
 
     /// Check or uncheck `task` (as listed by [`Day::tasks`]). `Ok(false)` when it's no longer
@@ -115,11 +147,45 @@ impl Day {
         })
     }
 
+    /// Change `task`'s text, keeping its mark, indentation and created time. `Ok(false)` when
+    /// it's no longer in the file or the text is empty.
+    pub fn edit(&mut self, task: &Task, text: &str) -> io::Result<bool> {
+        let text = clean(text);
+        if text.is_empty() { return Ok(false); }
+        self.change(|lines| match find(lines, task) {
+            Some(i) => {
+                let (done, _) = parse(&lines[i]).expect("found a task");
+                let bullet = lines[i].find('[').unwrap_or(0);
+                let new = format!("{}{}", &lines[i][..bullet], &task_line(&text, done, created(&lines[i]))[2..]);
+                let changed = new != lines[i];
+                lines[i] = new;
+                changed
+            }
+            None => false,
+        })
+    }
+
     /// Delete `task`'s line. `Ok(false)` when it's no longer in the file.
     pub fn remove(&mut self, task: &Task) -> io::Result<bool> {
         self.change(|lines| match find(lines, task) {
             Some(i) => { lines.remove(i); true }
             None => false,
+        })
+    }
+
+    /// Move `task` to where `target` is (both as listed by [`Day::tasks`]): above it when moving
+    /// up, below it when moving down. Only the task's own line moves. `Ok(false)` when either
+    /// is no longer in the file.
+    pub fn reorder(&mut self, task: &Task, target: &Task) -> io::Result<bool> {
+        self.change(|lines| match (find(lines, task), find(lines, target)) {
+            (Some(i), Some(j)) if i != j => {
+                // After the removal, `j` is right either way: before the target when it was
+                // above, after it when it was below (it shifted up a line).
+                let line = lines.remove(i);
+                lines.insert(j, line);
+                true
+            }
+            _ => false,
         })
     }
 
@@ -142,8 +208,8 @@ impl Day {
 }
 
 /// Add open tasks after the last task, or at the end (after a blank line) when there are none.
-fn insert_tasks(lines: &mut Vec<String>, texts: &[String]) {
-    let new = texts.iter().map(|t| task_line(t, false));
+fn insert_tasks(lines: &mut Vec<String>, tasks: &[(String, Option<i64>)]) {
+    let new = tasks.iter().map(|(t, created)| task_line(t, false, *created));
     match lines.iter().rposition(|l| parse(l).is_some()) {
         Some(i) => { lines.splice(i + 1..i + 1, new); }
         None => {
@@ -178,8 +244,8 @@ pub fn today(dir: &Path, date: Date) -> io::Result<Day> {
     let mut old = Day::load(dir, prev)?;
     let open: Vec<Task> = old.tasks().into_iter().filter(|t| !t.done).collect();
     if open.is_empty() { return Ok(day); }
-    let texts: Vec<String> = open.iter().map(|t| t.text.clone()).collect();
-    insert_tasks(&mut day.lines, &texts);
+    let carried: Vec<(String, Option<i64>)> = open.iter().map(|t| (t.text.clone(), t.created)).collect();
+    insert_tasks(&mut day.lines, &carried);
     // Today first: if the second write fails, a task shows twice rather than getting lost.
     day.save()?;
     for t in &open { old.lines[t.line] = set_mark(&old.lines[t.line], '>'); }
@@ -242,6 +308,13 @@ mod tests {
         dir
     }
 
+    /// The file with the created comments taken out.
+    fn without_created(path: &Path) -> String {
+        std::fs::read_to_string(path).unwrap().lines()
+            .map(|l| l.split(" <!-- created ").next().unwrap())
+            .collect::<Vec<_>>().join("\n") + "\n"
+    }
+
     #[test]
     fn parses_lines() {
         assert_eq!(parse("- [ ] buy milk"), Some((false, "buy milk")));
@@ -252,6 +325,12 @@ mod tests {
         assert_eq!(parse("# 2026-11-12"), None);
         assert_eq!(parse("- plain bullet"), None);
         assert_eq!(set_mark("  - [ ] a", 'x'), "  - [x] a");
+        let line = "- [ ] buy milk <!-- created 2026-11-12T09:15:00Z -->";
+        assert_eq!(parse(line), Some((false, "buy milk")));
+        assert_eq!(created(line), Some("2026-11-12T09:15:00Z".parse::<jiff::Timestamp>().unwrap().as_second()));
+        assert_eq!(task_line("buy milk", false, created(line)), line);
+        assert_eq!(parse("- [ ] a <!-- note -->"), Some((false, "a <!-- note -->")));
+        assert_eq!(created("- [ ] plain"), None);
     }
 
     #[test]
@@ -264,7 +343,8 @@ mod tests {
         assert!(day.add("  buy   milk ").unwrap());
         assert!(!day.add("   ").unwrap());
         day.add("review PR #42").unwrap();
-        assert_eq!(std::fs::read_to_string(&day.path).unwrap(), "# 2026-11-12\n\n- [ ] buy milk\n- [ ] review PR #42\n");
+        assert!(day.tasks().iter().all(|t| t.created.is_some()));
+        assert_eq!(without_created(&day.path), "# 2026-11-12\n\n- [ ] buy milk\n- [ ] review PR #42\n");
         // A note added by hand stays put.
         std::fs::write(&day.path, "# 2026-11-12\n\n- [ ] buy milk\n- [ ] review PR #42\n\n## Notes\nsomething\n").unwrap();
         let tasks = day.tasks();
@@ -273,7 +353,7 @@ mod tests {
         assert_eq!(day.counts(), (1, 3));
         let t = day.tasks();
         assert!(day.remove(&t[1]).unwrap());
-        assert_eq!(std::fs::read_to_string(&day.path).unwrap(),
+        assert_eq!(without_created(&day.path),
             "# 2026-11-12\n\n- [x] buy milk\n- [ ] call mum\n\n## Notes\nsomething\n");
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -305,6 +385,7 @@ mod tests {
         let day = today(&dir, d("2026-11-12")).unwrap();
         assert_eq!(peek(&dir, d("2026-11-12")), (0, 2));
         assert_eq!(day.tasks().iter().map(|t| t.text.as_str()).collect::<Vec<_>>(), ["dentist", "nested"]);
+        assert_eq!(day.tasks()[0].created, None);
         assert_eq!(std::fs::read_to_string(dir.join("2026-11-10.md")).unwrap(),
             "# 2026-11-10\n\n- [x] done\n- [>] dentist\n  - [>] nested\n");
         // The older day is left alone, and opening today again carries nothing more.
@@ -316,6 +397,55 @@ mod tests {
         let next = today(&dir, d("2026-11-13")).unwrap();
         assert_eq!(next.tasks().iter().map(|t| t.text.as_str()).collect::<Vec<_>>(), ["moved early", "dentist", "nested"]);
         assert_eq!(peek(&dir, d("2026-11-13")), (0, 3));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn edits_text_keeping_the_rest() {
+        let dir = tmp("edit-text");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("2026-11-12.md");
+        std::fs::write(&path, "# 2026-11-12\n\n  * [x] old <!-- created 2026-11-12T09:15:00Z -->\n- [ ] b\n").unwrap();
+        let mut day = Day::load(&dir, d("2026-11-12")).unwrap();
+        let t = day.tasks();
+        assert!(day.edit(&t[0], "  new   text ").unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(),
+            "# 2026-11-12\n\n  * [x] new text <!-- created 2026-11-12T09:15:00Z -->\n- [ ] b\n");
+        let t = day.tasks();
+        assert!(!day.edit(&t[1], "  ").unwrap());
+        assert!(!day.edit(&t[1], "b").unwrap());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn reorders_tasks() {
+        let dir = tmp("reorder");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("2026-11-12.md");
+        std::fs::write(&path, "# 2026-11-12\n\n- [ ] a\n- [ ] b\n\nnote\n- [x] c\n").unwrap();
+        let mut day = Day::load(&dir, d("2026-11-12")).unwrap();
+        let names = |day: &Day| day.tasks().iter().map(|t| t.text.clone()).collect::<Vec<_>>();
+        let t = day.tasks();
+        assert!(day.reorder(&t[0], &t[2]).unwrap()); // down, past a note
+        assert_eq!(names(&day), ["b", "c", "a"]);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# 2026-11-12\n\n- [ ] b\n\nnote\n- [x] c\n- [ ] a\n");
+        let t = day.tasks();
+        assert!(day.reorder(&t[2], &t[0]).unwrap()); // back up to the top
+        assert_eq!(names(&day), ["a", "b", "c"]);
+        let t = day.tasks();
+        assert!(!day.reorder(&t[1], &t[1]).unwrap());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn carry_over_keeps_created() {
+        let dir = tmp("carry-created");
+        std::fs::create_dir_all(&dir).unwrap();
+        let line = "- [ ] dentist <!-- created 2026-11-10T08:00:00Z -->";
+        std::fs::write(dir.join("2026-11-10.md"), format!("# 2026-11-10\n\n{line}\n")).unwrap();
+        let day = today(&dir, d("2026-11-12")).unwrap();
+        assert_eq!(day.tasks()[0].created, created(line));
+        assert!(std::fs::read_to_string(&day.path).unwrap().contains(line));
         let _ = std::fs::remove_dir_all(dir);
     }
 

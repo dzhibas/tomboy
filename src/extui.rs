@@ -15,7 +15,7 @@ use crate::ext::install::{self, Installed, InstalledEntry, Status};
 use crate::ext::manifest::{Manifest, Mode};
 use crate::ext::runtime::{Event, Runtime};
 use crate::ext::view::{Action, List, ListItem, View};
-use crate::{After, Item, NERD_FONT, Tomboy, frecency, keycap, quit, run_item, sys, ty, url};
+use crate::{After, Item, NERD_FONT, TodoAction, Tomboy, frecency, keycap, quit, run_item, sys, ty, url};
 
 /// nf-md-puzzle: an extension without an icon of its own.
 const EXT_GLYPH: &str = "\u{f0431}";
@@ -65,6 +65,7 @@ pub struct Panel {
 enum PanelAction {
     Ext(Action),
     Store(StoreAction),
+    Todo(TodoAction),
 }
 
 #[derive(Clone, Debug)]
@@ -82,6 +83,7 @@ impl PanelAction {
     fn title(&self) -> String {
         match self {
             PanelAction::Ext(a) => a.title().to_string(),
+            PanelAction::Todo(a) => a.title().to_string(),
             PanelAction::Store(a) => match a {
                 StoreAction::Install(_) => "Install".into(),
                 StoreAction::Update(_) => "Update".into(),
@@ -546,6 +548,8 @@ pub fn open_panel(s: &mut Tomboy) -> bool {
         session_actions(s).into_iter().map(PanelAction::Ext).collect()
     } else if s.store.is_some() {
         store_rows(s).get(s.picked).map(|r| store_actions(r).into_iter().map(PanelAction::Store).collect()).unwrap_or_default()
+    } else if s.todo.is_some() {
+        crate::todo_actions(s).into_iter().map(PanelAction::Todo).collect()
     } else {
         return false;
     };
@@ -574,16 +578,17 @@ pub fn run_panel(s: &mut Tomboy, tx: &mut Tx) {
     match p.actions.get(p.picked).cloned() {
         Some(PanelAction::Ext(a)) => run_action(s, a, tx),
         Some(PanelAction::Store(a)) => run_store_action(s, a, tx),
+        Some(PanelAction::Todo(a)) => crate::run_todo_action(s, a),
         None => {}
     }
 }
 
 pub fn has_panel_actions(s: &Tomboy) -> bool {
-    s.session.is_some() || s.store.is_some()
+    s.session.is_some() || s.store.is_some() || s.todo.is_some()
 }
 
 /// How the action panel opens on this platform.
-fn panel_key_hint() -> &'static str { if cfg!(target_os = "macos") { "⌘K" } else { "ctrl+k" } }
+pub fn panel_key_hint() -> &'static str { if cfg!(target_os = "macos") { "⌘K" } else { "ctrl+k" } }
 
 fn panel_view(p: &Panel, t: &tok::Theme, accent: Color) -> El {
     let mut list = col().key("action-panel").w(260.0).padding(6.0).gap(2.0).radius(10.0).fill(t.card)
@@ -601,7 +606,7 @@ fn panel_view(p: &Panel, t: &tok::Theme, accent: Color) -> El {
 }
 
 /// `body` with the action panel over its bottom-right corner when it's open.
-fn with_panel(s: &Tomboy, body: El, t: &tok::Theme, accent: Color) -> El {
+pub fn with_panel(s: &Tomboy, body: El, t: &tok::Theme, accent: Color) -> El {
     match &s.panel {
         Some(p) => col().w_full().grow(1.0).min_h(0.0).child(body).child(panel_view(p, t, accent)),
         None => body,
