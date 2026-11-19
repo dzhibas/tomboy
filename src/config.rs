@@ -102,7 +102,7 @@ pub struct HotkeysConfig {
 #[derive(Debug, Default, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct ClipboardConfig {
-    /// After picking a clip or emoji, paste it into the app in front (macOS daemon); default on.
+    /// After picking a clip or emoji, paste it into the app in front (macOS daemon, or Linux via `wtype`); default on.
     pub paste: Option<bool>,
 }
 

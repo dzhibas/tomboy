@@ -1080,12 +1080,22 @@ fn chat_running(s: &Tomboy) -> bool {
 fn quit(s: &mut Tomboy, tx: &mut Tx) {
     trace::mark("quit");
     if let Some(run) = &s.chat { run.stop(); }
+    // Linux has no resident window: the paste runs from a helper that outlives tomboy.
+    #[cfg(target_os = "linux")]
+    if std::mem::take(&mut s.paste) && s.config.paste() {
+        sys::paste_soon(std::time::Duration::from_millis(200));
+    }
     if s.resident { hide(s) } else { tx.quit() }
 }
 
-/// "Paste" when picking a clip (or emoji) also pastes it into the front app (the macOS daemon).
+/// "Paste" when picking a clip (or emoji) also pastes it into the front app: the macOS
+/// daemon, or Linux with a key-pressing helper (`wtype`, `hyprctl`, `xdotool`).
 fn clip_action(s: &Tomboy) -> &'static str {
-    if cfg!(target_os = "macos") && s.resident && s.config.paste() { "Paste" } else { "Copy to Clipboard" }
+    #[cfg(target_os = "macos")]
+    let can = s.resident;
+    #[cfg(target_os = "linux")]
+    let can = sys::can_paste();
+    if can && s.config.paste() { "Paste" } else { "Copy to Clipboard" }
 }
 
 // ---- The resident launcher (`tomboy daemon`, macOS) ----

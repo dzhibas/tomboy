@@ -84,6 +84,39 @@ pub fn copy_files(uri_list: &str) -> io::Result<bool> {
     }
 }
 
+/// Paste into the window that gets the keyboard once tomboy's window is gone: a detached
+/// helper waits `delay` (tomboy has quit and the compositor refocused the previous window),
+/// then presses Shift+Insert, which Omarchy's terminals and GTK/Qt apps all take as paste.
+/// Uses `wtype` (Wayland virtual keyboard), else Hyprland's `sendshortcut`, else `xdotool`.
+/// False when none is installed, so the pick is only copied.
+#[cfg(target_os = "linux")]
+pub fn paste_soon(delay: std::time::Duration) -> bool {
+    let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+    let press = if wayland && on_path("wtype") {
+        "wtype -M shift -k Insert -m shift"
+    } else if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() && on_path("hyprctl") {
+        "hyprctl dispatch sendshortcut SHIFT,Insert,"
+    } else if !wayland && on_path("xdotool") {
+        "xdotool key --clearmodifiers shift+Insert"
+    } else {
+        return false;
+    };
+    let script = format!("sleep {:.3}; {press}", delay.as_secs_f64());
+    spawn_detached(Command::new("sh").args(["-c", &script])).is_ok()
+}
+
+/// Whether [`paste_soon`] has a way to press keys here.
+#[cfg(target_os = "linux")]
+pub fn can_paste() -> bool {
+    static CAN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CAN.get_or_init(|| {
+        let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+        (wayland && on_path("wtype"))
+            || (std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() && on_path("hyprctl"))
+            || (!wayland && on_path("xdotool"))
+    })
+}
+
 /// Run `argv` in a new terminal window, starting in $HOME.
 #[cfg(target_os = "linux")]
 pub fn run_in_terminal(argv: &[&str]) -> io::Result<()> {

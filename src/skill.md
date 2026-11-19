@@ -166,7 +166,7 @@ lowercase with the names above (⌘ is `cmd`, ⌥ is `alt`, ⌃ is `ctrl`, ⇧ i
 
 | Key | Type | Default | What it does |
 | --- | --- | --- | --- |
-| `paste` | boolean | `true` | macOS daemon: picking a clip or emoji also pastes it into the app in front (needs the Accessibility permission). `false` only copies. |
+| `paste` | boolean | `true` | Picking a clip or emoji also pastes it into the app in front. macOS daemon: needs the Accessibility permission. Linux: presses Shift+Insert with `wtype` (or `hyprctl`/`xdotool`). `false` only copies. |
 
 Example:
 
